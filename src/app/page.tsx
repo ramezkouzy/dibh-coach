@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useRef, useState, useCallback } from "react";
+import { playClip, preloadAll, unlockAudio, type PhraseKey } from "@/audio";
 
 type Phase = "intro" | "position" | "calibrate" | "learn" | "practice" | "report";
 
@@ -27,14 +28,8 @@ const PRACTICE_HOLDS = 5;
 const LEARN_HOLDS = 5;
 const CALIBRATE_SECONDS = 20;
 
-function speak(text: string) {
-  if (typeof window === "undefined" || !window.speechSynthesis) return;
-  window.speechSynthesis.cancel();
-  const u = new SpeechSynthesisUtterance(text);
-  u.rate = 0.95;
-  u.pitch = 1;
-  window.speechSynthesis.speak(u);
-}
+// Coaching audio is delivered via prerecorded MP3 clips through playClip().
+// See src/audio.ts for the phrase catalogue and fallback behaviour.
 
 function fmt(n: number, digits = 1) {
   return n.toFixed(digits);
@@ -299,6 +294,10 @@ export default function Page() {
       setPermissionError("This device does not expose motion sensors.");
       return;
     }
+    // Same gesture: unlock audio and warm the clip cache so non-interactive
+    // playback works through the rest of the session.
+    unlockAudio();
+    preloadAll();
     traceRef.current = [];
     setPhase("position");
   }, []);
@@ -588,7 +587,7 @@ function CalibratePhase({
             .map((d) => d.p);
           if (samples.length < 30) {
             setWarning("Not enough sensor data — make sure motion is enabled and try again.");
-            speak("Not enough data. Let's try again.");
+            playClip("baseline_low_data");
             setRunning(false);
             return CALIBRATE_SECONDS;
           }
@@ -604,7 +603,7 @@ function CalibratePhase({
             setWarning(
               "Almost no chest movement detected. Make sure the phone is flat on your belly and breathe normally.",
             );
-            speak("I could not see your breathing. Place the phone on your belly and try again.");
+            playClip("baseline_no_breath");
             setRunning(false);
             return CALIBRATE_SECONDS;
           }
@@ -612,7 +611,7 @@ function CalibratePhase({
             setWarning(
               "Too much movement — try lying still and breathing normally without talking.",
             );
-            speak("There was too much movement. Let's try again.");
+            playClip("baseline_too_much");
             setRunning(false);
             return CALIBRATE_SECONDS;
           }
@@ -620,13 +619,13 @@ function CalibratePhase({
             setWarning(
               `Breath rate looked off (~${bpm.toFixed(0)} per minute). Breathe naturally and try again.`,
             );
-            speak("Your breathing looked unusual. Let's try once more.");
+            playClip("baseline_odd_rate");
             setRunning(false);
             return CALIBRATE_SECONDS;
           }
 
           setWarning(null);
-          speak("Baseline captured.");
+          playClip("baseline_done");
           onDoneRef.current({ meanPitch: mean, amplitudeDeg: amplitude });
           return 0;
         }
@@ -659,7 +658,7 @@ function CalibratePhase({
             startedAtRef.current = performance.now();
             setSecondsLeft(CALIBRATE_SECONDS);
             setRunning(true);
-            speak(`Breathe normally for ${CALIBRATE_SECONDS} seconds.`);
+            playClip("baseline_intro");
           }}
           className="rounded-xl bg-blue-600 hover:bg-blue-700 text-white font-semibold py-4 text-lg"
         >
@@ -722,7 +721,7 @@ function LearnPhase({
       peaks.reduce((a, b) => a + (b - mean) ** 2, 0) / peaks.length;
     const sd = Math.sqrt(variance);
     const tolerance = Math.max(1, sd * 1.5);
-    speak("All five holds learned. Get ready to practice.");
+    playClip("learn_complete");
     onDoneRef.current({
       targetPitch: baseline.meanPitch + mean,
       toleranceDeg: tolerance,
@@ -733,10 +732,10 @@ function LearnPhase({
   const runHold = useCallback(() => {
     setLastHoldNote(null);
     setStage("inhale");
-    speak("Take a deep breath in.");
+    playClip("learn_inhale");
     setTimeout(() => {
       setStage("hold");
-      speak("Hold it.");
+      playClip("learn_hold");
       holdStartRef.current = performance.now();
       let s = HOLD_SECONDS;
       setHoldSecondsLeft(s);
@@ -773,9 +772,7 @@ function LearnPhase({
           // Stash provisionally — if the user taps Redo we replace it.
           peaksRef.current.push(deviation);
           setLastHoldNote(note);
-          speak(
-            isStable ? "Good hold. Release and breathe." : "Release. Breathe.",
-          );
+          playClip(isStable ? "learn_release_good" : "learn_release");
           setStage("rest");
         }
       }, 1000);
@@ -932,10 +929,15 @@ function PracticePhase({
         (cue === "wayOff" && elapsed > REASSURE_INTERVAL_MS);
       if (shouldSpeak) {
         lastCueRef.current = { t: now, cue };
-        if (cue === "inZone") speak("Hold. Steady.");
-        else if (cue === "below") speak("Breathe in a little more, then hold.");
-        else if (cue === "above") speak("Ease down to the green zone.");
-        else speak("Release and try again.");
+        const clipKey: PhraseKey =
+          cue === "inZone"
+            ? "practice_in_zone"
+            : cue === "below"
+            ? "practice_below"
+            : cue === "above"
+            ? "practice_above"
+            : "practice_drift";
+        playClip(clipKey);
       }
     }, 400);
     return () => clearInterval(id);
@@ -946,10 +948,10 @@ function PracticePhase({
     setZone("inZone");
     outOfZoneSinceRef.current = null;
     lastCueRef.current = { t: 0, cue: "" };
-    speak("Take a deep breath in, then ease down into the green zone.");
+    playClip("practice_inhale");
     setTimeout(() => {
       setStage("hold");
-      speak("Hold it.");
+      playClip("practice_hold");
       holdStartRef.current = performance.now();
       let s = HOLD_SECONDS;
       setHoldSecondsLeft(s);
@@ -979,12 +981,12 @@ function PracticePhase({
             meanPitchInHold: mean,
             inZonePct,
           });
-          speak("Release. Breathe out.");
+          playClip("practice_release");
           setStage("rest");
           setTimeout(() => {
             const next = holdIdx + 1;
             if (next >= PRACTICE_HOLDS) {
-              speak("Session complete. Great work.");
+              playClip("practice_done");
               onDoneRef.current(holdsRef.current);
             } else {
               setHoldIdx(next);

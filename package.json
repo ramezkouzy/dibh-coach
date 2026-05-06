@@ -5,7 +5,8 @@
   "scripts": {
     "dev": "next dev",
     "build": "next build",
-    "start": "next start"
+    "start": "next start",
+    "tts:generate": "node scripts/generate-tts.mjs"
   },
   "dependencies": {
     "next": "16.2.4",
