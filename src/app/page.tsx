@@ -531,16 +531,15 @@ function PositionPhase({
       </div>
 
       <button
-        disabled={status !== "ready"}
         onClick={onReady}
-        className={`w-full rounded-xl font-semibold py-4 text-lg transition ${
-          status === "ready"
-            ? "bg-blue-600 hover:bg-blue-700 text-white"
-            : "bg-slate-200 text-slate-400 cursor-not-allowed"
-        }`}
+        className="w-full rounded-xl font-semibold py-4 text-lg bg-blue-600 hover:bg-blue-700 text-white transition"
       >
-        Continue to baseline
+        {status === "ready" ? "Continue to baseline" : "Continue anyway"}
       </button>
+      <p className="text-xs text-slate-500 text-center">
+        The check above is a hint — tap Continue when you&apos;re lying flat with the phone on
+        your belly, even if it hasn&apos;t turned green.
+      </p>
     </div>
   );
 }
