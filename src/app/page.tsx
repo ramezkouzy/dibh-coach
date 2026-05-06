@@ -2,7 +2,7 @@
 
 import { useEffect, useRef, useState, useCallback } from "react";
 
-type Phase = "intro" | "calibrate" | "learn" | "practice" | "report";
+type Phase = "intro" | "position" | "calibrate" | "learn" | "practice" | "report";
 
 type Hold = {
   durationSec: number;
@@ -98,12 +98,44 @@ export default function Page() {
   const [permissionError, setPermissionError] = useState<string | null>(null);
 
   const pitchRef = useRef(0);
+  const rollRef = useRef(0);
+  const gravityZRef = useRef(0);
   const traceRef = useRef<{ t: number; p: number }[]>([]);
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
 
   const [baseline, setBaseline] = useState<Baseline | null>(null);
   const [plateau, setPlateau] = useState<Plateau | null>(null);
   const [holds, setHolds] = useState<Hold[]>([]);
+
+  // Wake lock so the screen doesn't blank during a session.
+  useEffect(() => {
+    if (phase === "intro" || phase === "report") return;
+    let lock: WakeLockSentinel | null = null;
+    let cancelled = false;
+    const acquire = async () => {
+      try {
+        const nav = navigator as Navigator & {
+          wakeLock?: { request: (type: "screen") => Promise<WakeLockSentinel> };
+        };
+        if (nav.wakeLock) {
+          lock = await nav.wakeLock.request("screen");
+          if (cancelled && lock) lock.release();
+        }
+      } catch {
+        // Wake lock is best-effort; fall back silently.
+      }
+    };
+    acquire();
+    const onVisible = () => {
+      if (document.visibilityState === "visible") acquire();
+    };
+    document.addEventListener("visibilitychange", onVisible);
+    return () => {
+      cancelled = true;
+      document.removeEventListener("visibilitychange", onVisible);
+      lock?.release();
+    };
+  }, [phase]);
 
   // ---- sensor wiring -----------------------------------------------------
   // We throttle React display updates to ~10 fps so the parent does not re-render
@@ -112,13 +144,17 @@ export default function Page() {
   const lastDisplayUpdateRef = useRef(0);
   useEffect(() => {
     if (phase === "intro") return;
-    const handler = (e: DeviceOrientationEvent) => {
-      // beta = rotation around X (pitch). When phone lies flat on belly screen-up,
-      // beta sits near 0 and changes as the belly rises and falls.
+    const orientHandler = (e: DeviceOrientationEvent) => {
+      // beta = rotation around X (pitch). When phone lies flat on belly screen-up
+      // in portrait orientation, beta sits near 0 and changes as the belly rises
+      // and falls. gamma is roll, used by the positioning gate.
       if (e.beta == null) return;
       const alpha = 0.3;
       const next = pitchRef.current * (1 - alpha) + e.beta * alpha;
       pitchRef.current = next;
+      if (e.gamma != null) {
+        rollRef.current = rollRef.current * (1 - alpha) + e.gamma * alpha;
+      }
       const now = performance.now();
       traceRef.current.push({ t: now, p: next });
       const cutoff = now - 30_000;
@@ -130,8 +166,20 @@ export default function Page() {
         setPitch(next);
       }
     };
-    window.addEventListener("deviceorientation", handler);
-    return () => window.removeEventListener("deviceorientation", handler);
+    const motionHandler = (e: DeviceMotionEvent) => {
+      // gravity Z tells us which side of the phone is up. Positive Z (toward
+      // viewer) = screen up; negative = screen down. Used in the position gate.
+      const g = e.accelerationIncludingGravity;
+      if (g && g.z != null) {
+        gravityZRef.current = gravityZRef.current * 0.7 + g.z * 0.3;
+      }
+    };
+    window.addEventListener("deviceorientation", orientHandler);
+    window.addEventListener("devicemotion", motionHandler);
+    return () => {
+      window.removeEventListener("deviceorientation", orientHandler);
+      window.removeEventListener("devicemotion", motionHandler);
+    };
   }, [phase]);
 
   // ---- live trace render -------------------------------------------------
@@ -225,6 +273,9 @@ export default function Page() {
     const Doc = (typeof DeviceOrientationEvent !== "undefined" ? DeviceOrientationEvent : null) as
       | (typeof DeviceOrientationEvent & { requestPermission?: () => Promise<"granted" | "denied"> })
       | null;
+    const Mot = (typeof DeviceMotionEvent !== "undefined" ? DeviceMotionEvent : null) as
+      | (typeof DeviceMotionEvent & { requestPermission?: () => Promise<"granted" | "denied"> })
+      | null;
     if (Doc && typeof Doc.requestPermission === "function") {
       try {
         const result = await Doc.requestPermission();
@@ -237,12 +288,19 @@ export default function Page() {
         return;
       }
     }
+    if (Mot && typeof Mot.requestPermission === "function") {
+      try {
+        await Mot.requestPermission();
+      } catch {
+        // Non-fatal; orientation alone is enough for the core flow.
+      }
+    }
     if (typeof window !== "undefined" && !("DeviceOrientationEvent" in window)) {
       setPermissionError("This device does not expose motion sensors.");
       return;
     }
     traceRef.current = [];
-    setPhase("calibrate");
+    setPhase("position");
   }, []);
 
   return (
@@ -251,6 +309,19 @@ export default function Page() {
 
       {phase === "intro" && (
         <Intro onStart={requestPermission} permissionError={permissionError} />
+      )}
+
+      {phase === "position" && (
+        <PositionPhase
+          pitch={pitch}
+          pitchRef={pitchRef}
+          rollRef={rollRef}
+          gravityZRef={gravityZRef}
+          onReady={() => {
+            traceRef.current = [];
+            setPhase("calibrate");
+          }}
+        />
       )}
 
       {phase === "calibrate" && (
@@ -316,12 +387,21 @@ export default function Page() {
 
 function Header({ phase }: { phase: Phase }) {
   const stepNum =
-    phase === "calibrate" ? 1 : phase === "learn" ? 2 : phase === "practice" ? 3 : null;
+    phase === "position"
+      ? 1
+      : phase === "calibrate"
+      ? 2
+      : phase === "learn"
+      ? 3
+      : phase === "practice"
+      ? 4
+      : null;
+  const totalSteps = 4;
   return (
     <header className="w-full mb-4">
       <div className="flex items-center justify-between">
         <h1 className="text-lg font-semibold tracking-tight">DIBH Coach</h1>
-        {stepNum && <span className="text-xs text-slate-500">Step {stepNum} of 3</span>}
+        {stepNum && <span className="text-xs text-slate-500">Step {stepNum} of {totalSteps}</span>}
       </div>
     </header>
   );
@@ -348,17 +428,18 @@ function Intro({
         <li className="flex gap-3">
           <span className="font-mono text-blue-600 font-semibold">1.</span>
           <span>
-            Lie flat on your back. Place this phone <strong>screen-up on your belly</strong>, on
-            the dot your doctor drew.
+            Lie flat on your back. Place this phone <strong>screen-up on your belly</strong>,
+            held in <strong>portrait</strong>, charging port toward your feet, on the dot your
+            doctor drew.
           </span>
         </li>
         <li className="flex gap-3">
           <span className="font-mono text-blue-600 font-semibold">2.</span>
-          <span>We&apos;ll record a baseline, then learn your breath-hold.</span>
+          <span>We&apos;ll check your phone is set right, then record a baseline.</span>
         </li>
         <li className="flex gap-3">
           <span className="font-mono text-blue-600 font-semibold">3.</span>
-          <span>You&apos;ll practice 5 holds with live coaching.</span>
+          <span>We&apos;ll learn your breath-hold, then practice with audio coaching.</span>
         </li>
       </ol>
 
@@ -373,6 +454,94 @@ function Intro({
         This is a practice tool, not a medical device. It does not replace any instruction
         from your radiation oncology team.
       </p>
+    </div>
+  );
+}
+
+function PositionPhase({
+  pitch,
+  pitchRef,
+  rollRef,
+  gravityZRef,
+  onReady,
+}: {
+  pitch: number;
+  pitchRef: React.RefObject<number>;
+  rollRef: React.RefObject<number>;
+  gravityZRef: React.RefObject<number>;
+  onReady: () => void;
+}) {
+  // "Steady & flat" check: |pitch| and |roll| both small, screen up, and the
+  // values aren't moving much for 2 consecutive seconds.
+  const [status, setStatus] = useState<"hunting" | "ready">("hunting");
+  const [reason, setReason] = useState<string>("Place phone flat, screen-up, on your belly.");
+  const stableSinceRef = useRef<number | null>(null);
+
+  useEffect(() => {
+    const id = setInterval(() => {
+      const p = pitchRef.current;
+      const r = rollRef.current;
+      const gz = gravityZRef.current;
+      const flat = Math.abs(p) < 25 && Math.abs(r) < 25;
+      const screenUp = gz > 4; // gravity ≈ 9.8 m/s² toward viewer when screen-up
+      if (!screenUp && Math.abs(gz) > 0.1) {
+        setReason("Phone looks face-down. Screen should face up at the ceiling.");
+        stableSinceRef.current = null;
+        setStatus("hunting");
+        return;
+      }
+      if (!flat) {
+        setReason("Lay the phone flat on your belly.");
+        stableSinceRef.current = null;
+        setStatus("hunting");
+        return;
+      }
+      // OK — start the stability timer
+      if (stableSinceRef.current == null) {
+        stableSinceRef.current = performance.now();
+        setReason("Almost there — hold still…");
+        setStatus("hunting");
+        return;
+      }
+      if (performance.now() - stableSinceRef.current > 2000) {
+        setReason("Ready.");
+        setStatus("ready");
+      }
+    }, 200);
+    return () => clearInterval(id);
+  }, [pitchRef, rollRef, gravityZRef]);
+
+  return (
+    <div className="flex-1 flex flex-col gap-4 w-full">
+      <h2 className="text-xl font-semibold">Position your phone</h2>
+      <p className="text-slate-700 text-sm">
+        Lie flat on your back. Phone <strong>screen-up</strong>, in <strong>portrait</strong>,
+        charging port toward your feet, resting on the dot your doctor drew.
+      </p>
+
+      <div
+        className={`rounded-2xl p-6 text-center transition-colors ${
+          status === "ready" ? "bg-green-100 text-green-900" : "bg-slate-100 text-slate-700"
+        }`}
+      >
+        <div className="text-5xl mb-2">{status === "ready" ? "✓" : "…"}</div>
+        <div className="font-semibold">{reason}</div>
+        <div className="mt-3 text-xs font-mono text-slate-500">
+          pitch {fmt(pitch)}° · roll {fmt(rollRef.current ?? 0)}°
+        </div>
+      </div>
+
+      <button
+        disabled={status !== "ready"}
+        onClick={onReady}
+        className={`w-full rounded-xl font-semibold py-4 text-lg transition ${
+          status === "ready"
+            ? "bg-blue-600 hover:bg-blue-700 text-white"
+            : "bg-slate-200 text-slate-400 cursor-not-allowed"
+        }`}
+      >
+        Continue to baseline
+      </button>
     </div>
   );
 }
@@ -691,6 +860,11 @@ function LearnPhase({
   );
 }
 
+type ZoneState = "below" | "inZone" | "above" | "wayOff";
+
+const DRIFT_LIMIT_MS = 3000; // sustained out-of-zone before "release" cue
+const REASSURE_INTERVAL_MS = 2500; // how often to re-speak "hold steady"
+
 function PracticePhase({
   pitch,
   baseline,
@@ -711,36 +885,71 @@ function PracticePhase({
   const [holdIdx, setHoldIdx] = useState(0);
   const [stage, setStage] = useState<"idle" | "inhale" | "hold" | "rest">("idle");
   const [holdSecondsLeft, setHoldSecondsLeft] = useState(HOLD_SECONDS);
+  const [zone, setZone] = useState<ZoneState>("inZone");
   const holdsRef = useRef<Hold[]>([]);
   const holdStartRef = useRef<number | null>(null);
+  const outOfZoneSinceRef = useRef<number | null>(null);
   const lastCueRef = useRef<{ t: number; cue: string }>({ t: 0, cue: "" });
+  const onDoneRef = useRef(onDone);
+  useEffect(() => {
+    onDoneRef.current = onDone;
+  });
 
+  // ---- live coaching during hold ---------------------------------------
   useEffect(() => {
     if (stage !== "hold") return;
     const id = setInterval(() => {
       const dev = pitchRef.current - plateau.targetPitch;
       const absDev = Math.abs(dev);
-      let cue = "";
-      if (absDev <= plateau.toleranceDeg) cue = "good";
-      else if (dev > 0) cue = "ease";
-      else cue = "deeper";
+      const inZone = absDev <= plateau.toleranceDeg;
+
+      // track sustained out-of-zone
       const now = performance.now();
-      if (cue !== lastCueRef.current.cue && now - lastCueRef.current.t > 1500) {
-        lastCueRef.current = { t: now, cue };
-        if (cue === "good") speak("Right there. Stay there.");
-        else if (cue === "ease") speak("Ease back a touch.");
-        else speak("Just a little deeper.");
+      if (inZone) {
+        outOfZoneSinceRef.current = null;
+      } else if (outOfZoneSinceRef.current == null) {
+        outOfZoneSinceRef.current = now;
       }
-    }, 600);
+      const sustainedMs = outOfZoneSinceRef.current
+        ? now - outOfZoneSinceRef.current
+        : 0;
+
+      let next: ZoneState;
+      if (inZone) next = "inZone";
+      else if (sustainedMs > DRIFT_LIMIT_MS || absDev > plateau.toleranceDeg * 3)
+        next = "wayOff";
+      else if (dev > 0) next = "above";
+      else next = "below";
+      setZone(next);
+
+      // speak cues — debounce so we don't jabber
+      const cue = next;
+      const last = lastCueRef.current;
+      const elapsed = now - last.t;
+      const shouldSpeak =
+        (cue !== last.cue && elapsed > 1500) ||
+        (cue === "inZone" && elapsed > REASSURE_INTERVAL_MS) ||
+        (cue === "wayOff" && elapsed > REASSURE_INTERVAL_MS);
+      if (shouldSpeak) {
+        lastCueRef.current = { t: now, cue };
+        if (cue === "inZone") speak("Hold. Steady.");
+        else if (cue === "below") speak("Breathe in a little more, then hold.");
+        else if (cue === "above") speak("Ease down to the green zone.");
+        else speak("Release and try again.");
+      }
+    }, 400);
     return () => clearInterval(id);
   }, [stage, plateau, pitchRef]);
 
   const runHold = useCallback(() => {
     setStage("inhale");
-    speak("Deep breath in.");
+    setZone("inZone");
+    outOfZoneSinceRef.current = null;
+    lastCueRef.current = { t: 0, cue: "" };
+    speak("Take a deep breath in, then ease down into the green zone.");
     setTimeout(() => {
       setStage("hold");
-      speak("Hold it. Find your zone.");
+      speak("Hold it.");
       holdStartRef.current = performance.now();
       let s = HOLD_SECONDS;
       setHoldSecondsLeft(s);
@@ -751,7 +960,7 @@ function PracticePhase({
           clearInterval(tick);
           const start = holdStartRef.current ?? performance.now();
           const samples = traceRef.current.filter((d) => d.t >= start).map((d) => d.p);
-          const inZone = samples.filter(
+          const inZoneCount = samples.filter(
             (p) => Math.abs(p - plateau.targetPitch) <= plateau.toleranceDeg,
           ).length;
           let peak = baseline.meanPitch;
@@ -763,7 +972,7 @@ function PracticePhase({
           const mean = samples.length
             ? samples.reduce((a, b) => a + b, 0) / samples.length
             : baseline.meanPitch;
-          const inZonePct = samples.length ? (inZone / samples.length) * 100 : 0;
+          const inZonePct = samples.length ? (inZoneCount / samples.length) * 100 : 0;
           holdsRef.current.push({
             durationSec: HOLD_SECONDS,
             peakPitch: peak,
@@ -776,7 +985,7 @@ function PracticePhase({
             const next = holdIdx + 1;
             if (next >= PRACTICE_HOLDS) {
               speak("Session complete. Great work.");
-              onDone(holdsRef.current);
+              onDoneRef.current(holdsRef.current);
             } else {
               setHoldIdx(next);
               setStage("idle");
@@ -784,43 +993,34 @@ function PracticePhase({
           }, 3000);
         }
       }, 1000);
-    }, 4000);
-  }, [holdIdx, baseline, plateau, traceRef, onDone]);
+    }, 4500);
+  }, [holdIdx, baseline, plateau, traceRef]);
 
-  const dev = pitch - plateau.targetPitch;
-  const inZone = Math.abs(dev) <= plateau.toleranceDeg;
+  // ---- visual during hold: full-screen color + big glanceable cue ------
+  if (stage === "hold") {
+    return (
+      <HoldOverlay
+        zone={zone}
+        secondsLeft={holdSecondsLeft}
+        pitch={pitch}
+        plateau={plateau}
+        holdIdx={holdIdx}
+      />
+    );
+  }
 
   return (
     <div className="flex-1 flex flex-col gap-4 w-full">
       <h2 className="text-xl font-semibold">Practice</h2>
       <p className="text-slate-700 text-sm">
-        Reproduce the same hold. Stay inside the green band. Listen for cues.
+        Inhale a bit past your target, then ease down into the green zone and hold there.
+        Audio will guide you. The screen will go full color so you can glance at it.
       </p>
 
       <Trace canvasRef={canvasRef} pitch={pitch} />
 
-      <div
-        className={`rounded-xl py-3 px-4 text-center transition-colors ${
-          stage === "hold"
-            ? inZone
-              ? "bg-green-100 text-green-900"
-              : "bg-amber-100 text-amber-900"
-            : "bg-slate-100 text-slate-700"
-        }`}
-      >
-        {stage === "hold" ? (
-          inZone ? (
-            <span className="font-semibold">In the zone</span>
-          ) : dev > 0 ? (
-            <span className="font-semibold">Ease back a touch</span>
-          ) : (
-            <span className="font-semibold">A little deeper</span>
-          )
-        ) : (
-          <span className="text-sm text-slate-500">
-            Target {fmt(plateau.targetPitch)}° ± {fmt(plateau.toleranceDeg)}°
-          </span>
-        )}
+      <div className="rounded-xl bg-slate-100 py-3 px-4 text-center text-sm text-slate-500">
+        Target {fmt(plateau.targetPitch)}° ± {fmt(plateau.toleranceDeg)}°
       </div>
 
       <div className="rounded-xl bg-slate-100 p-4 text-center">
@@ -836,17 +1036,65 @@ function PracticePhase({
           </button>
         )}
         {stage === "inhale" && (
-          <div className="mt-3 text-2xl font-semibold text-blue-700">Breathe in…</div>
-        )}
-        {stage === "hold" && (
-          <div className="mt-3">
-            <div className="text-3xl font-mono font-semibold text-blue-700">{holdSecondsLeft}s</div>
-            <div className="text-sm text-slate-500">Hold it</div>
+          <div className="mt-3 text-2xl font-semibold text-blue-700">
+            Breathe in… ease down into the zone
           </div>
         )}
         {stage === "rest" && (
           <div className="mt-3 text-lg text-slate-700">Release. Breathe.</div>
         )}
+      </div>
+    </div>
+  );
+}
+
+function HoldOverlay({
+  zone,
+  secondsLeft,
+  pitch,
+  plateau,
+  holdIdx,
+}: {
+  zone: ZoneState;
+  secondsLeft: number;
+  pitch: number;
+  plateau: Plateau;
+  holdIdx: number;
+}) {
+  const dev = pitch - plateau.targetPitch;
+  const palette =
+    zone === "inZone"
+      ? "bg-green-500 text-white"
+      : zone === "wayOff"
+      ? "bg-red-600 text-white"
+      : "bg-amber-500 text-white";
+  const word =
+    zone === "inZone"
+      ? "HOLD"
+      : zone === "below"
+      ? "DEEPER ↑"
+      : zone === "above"
+      ? "EASE ↓"
+      : "RELEASE";
+  const sub =
+    zone === "inZone"
+      ? "Stay right here"
+      : zone === "below"
+      ? "Breathe in a little more"
+      : zone === "above"
+      ? "Ease down into the zone"
+      : "Release and try again";
+  return (
+    <div className={`fixed inset-0 z-50 flex flex-col items-center justify-center ${palette} transition-colors`}>
+      <div className="absolute top-4 left-4 text-xs opacity-80">
+        Hold {Math.min(holdIdx + 1, PRACTICE_HOLDS)} of {PRACTICE_HOLDS}
+      </div>
+      <div className="absolute top-4 right-4 text-xl font-mono font-semibold">{secondsLeft}s</div>
+      <div className="text-7xl font-extrabold tracking-tight">{word}</div>
+      <div className="mt-2 text-lg opacity-90">{sub}</div>
+      <div className="mt-8 text-sm font-mono opacity-80">
+        pitch {fmt(pitch)}° · target {fmt(plateau.targetPitch)}° ({dev >= 0 ? "+" : ""}
+        {fmt(dev)}°)
       </div>
     </div>
   );
