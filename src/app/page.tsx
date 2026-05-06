@@ -26,7 +26,7 @@ const P = {
 
 type Phase = "welcome" | "placement" | "calibration" | "session" | "complete";
 
-type Baseline = { meanPitch: number; amplitudeDeg: number };
+type Baseline = { meanPitch: number; amplitudeDeg: number; breathingSD: number };
 type Hold = {
   index: number;
   totalDurationSec: number;
@@ -41,11 +41,15 @@ type Hold = {
 
 // ─── Tunables ───────────────────────────────────────────────────────────────
 const STABILITY_WINDOW_MS = 2000; // SD over the last N ms = stability check
-const STABLE_SD_DEG = 0.6; // pitch SD below this = "stable"
-const STABLE_DEBOUNCE_MS = 1200; // must hold stability for this long before "lock" event
+// Adaptive stability threshold: baseline breathing SD × this fraction.
+// Real recording showed normal breathing SD ≈ 0.3°, hold SD ≈ 0.15°. Anything
+// under ~half the baseline SD is reliably "held still". Clamped to a sane
+// floor/ceiling.
+const STABLE_SD_FRAC_OF_BASELINE = 0.5;
+const STABLE_SD_FLOOR = 0.08;
+const STABLE_SD_CEILING = 1.2;
+const STABLE_DEBOUNCE_MS = 1000; // must hold stability for this long before "lock" event
 const DRIFT_DEBOUNCE_MS = 1500; // out-of-stable for this long before "drift" event
-const RELEASE_PITCH_FRAC = 0.4; // pitch must drop below baseline + (frac * peak) for >RELEASE_TIME to count as released
-const RELEASE_TIME_MS = 1500;
 const CALIBRATE_SEC = 12;
 const CALIBRATE_SETTLE_SEC = 2;
 const HOLD_TARGET_OPTIONS = [15, 20, 25, 30, 35] as const;
@@ -990,10 +994,12 @@ function Placement({
             margin: 0,
           }}
         >
-          Lay back, place phone on your belly
+          Lay back, balance the phone on your tummy
         </h2>
         <p style={{ fontSize: 14, lineHeight: 1.55, color: P.ink2, marginTop: 12 }}>
-          Just below your ribcage, screen up. We use the phone&apos;s gentle motion to read your breath.
+          Phone in <strong>portrait</strong>, screen up. The <strong>top edge</strong> just
+          below your sternum, the <strong>bottom edge</strong> on your lower belly. The phone
+          should bridge the chest-to-belly seam — that&apos;s how we feel your breath rise.
         </p>
         <Card
           className="mt-6 flex items-center justify-center relative"
@@ -1013,7 +1019,12 @@ function Placement({
           <Figure />
         </Card>
         <div className="mt-4 flex flex-wrap gap-2">
-          {["Screen up", "Below ribcage", "Loose clothing", "Phone unlocked"].map((t) => (
+          {[
+            "Portrait",
+            "Top edge under sternum",
+            "Bottom edge on belly",
+            "Loose clothing",
+          ].map((t) => (
             <Pill key={t}>{t}</Pill>
           ))}
         </div>
@@ -1091,6 +1102,9 @@ function Calibration({
           const min = Math.min(...samples);
           const max = Math.max(...samples);
           const amplitude = max - min;
+          const variance =
+            samples.reduce((a, b) => a + (b - mean) ** 2, 0) / samples.length;
+          const breathingSD = Math.sqrt(variance);
           const usableSec = CALIBRATE_SEC - CALIBRATE_SETTLE_SEC;
           const bpm = estimateBreathRate(samples, usableSec);
 
@@ -1114,7 +1128,11 @@ function Calibration({
           }
           setWarning(null);
           cue("baseline_done");
-          onContinueRef.current({ meanPitch: mean, amplitudeDeg: amplitude });
+          onContinueRef.current({
+            meanPitch: mean,
+            amplitudeDeg: amplitude,
+            breathingSD,
+          });
           return 0;
         }
         return s - 1;
@@ -1214,8 +1232,7 @@ function Calibration({
 type SessionStage = "idle" | "active" | "exhale" | "between";
 
 const POST_TARGET_AUTOEND_MS = 5000; // auto-end this long after target is reached
-const RELEASE_PEAK_FRAC = 0.3; // dev < frac * peak (and sustained) = release
-const RELEASE_SUSTAIN_MS = 1500;
+const RELEASE_SUSTAIN_MS = 1500; // movement (SD spike) sustained = release
 
 function Session({
   baseline,
@@ -1349,14 +1366,20 @@ function Session({
       const absDev = Math.abs(dev);
       peakDevRef.current = Math.max(peakDevRef.current, absDev);
 
-      // Live breath scale 0..1 — relative to running peak (or a sensible
-      // floor of 8° so the orb starts proportional, not maxed out).
-      const ref = Math.max(8, peakDevRef.current);
+      // Live breath scale 0..1 — relative to running peak with a tiny floor
+      // (0.5°). Patients vary wildly in how much their phone tilts: real
+      // recordings show some get 1°, others might get 10°. Let it self-scale.
+      const ref = Math.max(0.5, peakDevRef.current);
       setBreathScale(Math.min(1, absDev / ref));
 
-      // Stability detection
+      // Stability detection. Adaptive threshold = half the breathing-baseline
+      // SD measured during calibrate, clamped to a floor/ceiling.
       const sd = rollingSD(traceRef.current, STABILITY_WINDOW_MS);
-      const wantStable = sd < STABLE_SD_DEG && absDev > 2; // require some inhale
+      const adaptiveThreshold = Math.min(
+        STABLE_SD_CEILING,
+        Math.max(STABLE_SD_FLOOR, baseline.breathingSD * STABLE_SD_FRAC_OF_BASELINE),
+      );
+      const wantStable = sd < adaptiveThreshold;
       const cs = candidateStateRef.current;
       if (wantStable !== cs.wantStable) {
         candidateStateRef.current = { wantStable, since: now };
@@ -1409,9 +1432,11 @@ function Session({
         }
       }
 
-      // Auto-release path 1: pitch dropped to <30% of peak hold deviation
-      // for >1.5s. Only meaningful once we've actually peaked.
-      if (peakDevRef.current > 4 && absDev < peakDevRef.current * RELEASE_PEAK_FRAC) {
+      // Auto-release path 1: rolling SD jumps WELL above the adaptive
+      // threshold for >1.5s. The actual signal of release is "patient is
+      // moving again" — that shows up in SD, not in pitch magnitude.
+      // Only meaningful after a lock (so we know the patient was holding).
+      if (firstLockAtRef.current != null && sd > adaptiveThreshold * 3) {
         if (releaseCandidateSinceRef.current == null) {
           releaseCandidateSinceRef.current = now;
         } else if (now - releaseCandidateSinceRef.current > RELEASE_SUSTAIN_MS) {
