@@ -22,6 +22,17 @@ export const PHRASES = {
   release_breath: "Release. Breathe normally.",
   session_done: "Session complete. Great work.",
 
+  // learn phase — three comfortable holds to set the session target
+  learn_intro: "Three comfortable holds. Find a depth you can hold steady.",
+  learn_got_one: "Good. Two more like that.",
+  learn_got_two: "One more comfortable hold.",
+  learn_target_locked: "Target locked. Let's match it.",
+
+  // practice phase — position-match cues
+  go_deeper: "A little deeper.",
+  ease_back: "Ease back a touch.",
+  right_there: "Right there. Hold steady.",
+
   // legacy keys retained so existing MP3s still resolve.
   // Safe to delete after re-recording, but harmless if left.
   learn_inhale: "Take a deep breath in.",

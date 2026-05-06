@@ -24,9 +24,20 @@ const P = {
   warn: "#d99466",
 };
 
-type Phase = "welcome" | "placement" | "calibration" | "session" | "complete";
+type Phase = "welcome" | "placement" | "calibration" | "learn" | "session" | "complete";
 
 type Baseline = { meanPitch: number; amplitudeDeg: number; breathingSD: number };
+
+// The target depth + tolerance learned from 3 comfortable calibration holds.
+// FUTURE: persist to localStorage for an inter-session drift readout —
+// "your usual hold is at X°, today's was at Y°, drift Z°" — useful for
+// clinician review of patient consistency across days.
+type Plateau = {
+  targetPitch: number;
+  toleranceDeg: number;
+  calibrationHolds: { plateauPitch: number; plateauSD: number }[];
+};
+
 type Hold = {
   index: number;
   totalDurationSec: number;
@@ -36,6 +47,10 @@ type Hold = {
   timeToLockSec: number | null; // seconds from "start" to first stability lock
   plateauPitch: number | null; // median pitch during the longest stable run
   plateauSD: number | null; // SD during the longest stable run
+  // Practice phase only: how long was the patient stable AND within tolerance
+  // of the session target. The clinical metric — sustained reproducible hold.
+  onTargetSec: number;
+  longestOnTargetRunSec: number;
   reachedTarget: boolean;
 };
 
@@ -53,6 +68,9 @@ const STABLE_SD_FLOOR = 0.08;
 const STABLE_SD_CEILING = 1.2;
 const STABLE_DEBOUNCE_MS = 1000; // must hold stability for this long before "lock" event
 const DRIFT_DEBOUNCE_MS = 1500; // out-of-stable for this long before "drift" event
+const LEARN_HOLDS = 3; // comfortable calibration holds → averaged target
+const TOLERANCE_FLOOR_DEG = 0.5; // never tighter than ±0.5° of target
+const TOLERANCE_SD_MULT = 2; // tolerance = max(SD_across_calib_holds × this, floor)
 const CALIBRATE_SEC = 12;
 const CALIBRATE_SETTLE_SEC = 2;
 const HOLD_TARGET_OPTIONS = [15, 20, 25, 30, 35] as const;
@@ -302,6 +320,7 @@ function Orb({
   breathScale,
   freeze = false,
   mood = "calm",
+  targetScale,
   secondsLeft,
   label,
 }: {
@@ -313,6 +332,9 @@ function Orb({
   // tracking — the "apex held" feeling.
   freeze?: boolean;
   mood?: OrbMood;
+  // 0..1 — where the orb should sit when on-target. Renders as a dashed
+  // ring at that size. The patient inhales until their live orb fills it.
+  targetScale?: number;
   secondsLeft?: number | null;
   label?: string;
 }) {
@@ -365,6 +387,21 @@ function Orb({
           transition: `transform ${dur} cubic-bezier(.4,0,.3,1)`,
         }}
       />
+      {targetScale != null && (
+        <div
+          style={{
+            position: "absolute",
+            width: "60%",
+            height: "60%",
+            borderRadius: "50%",
+            border: `2px dashed ${P.skyDeep}`,
+            opacity: 0.45,
+            transform: `scale(${0.45 + Math.min(1, Math.max(0, targetScale)) * 0.65})`,
+            transition: "transform 0.4s cubic-bezier(.4,0,.3,1)",
+            pointerEvents: "none",
+          }}
+        />
+      )}
       <div
         style={{
           position: "absolute",
@@ -419,6 +456,80 @@ function Orb({
   );
 }
 
+function PositionMeter({
+  pitch,
+  target,
+  tolerance,
+  label,
+}: {
+  pitch: number;
+  target: number;
+  tolerance: number;
+  label: "deeper" | "ease" | "ontarget" | "—";
+}) {
+  // Map a window of ±2.5×tolerance around target onto 0..1
+  const range = Math.max(2.5 * tolerance, 4);
+  const clamp = (n: number) => Math.min(1, Math.max(0, n));
+  const dotPos = clamp((pitch - target + range) / (2 * range));
+  const bandLeft = clamp((-tolerance + range) / (2 * range));
+  const bandRight = clamp((tolerance + range) / (2 * range));
+  const tone =
+    label === "ontarget" ? P.good : label === "deeper" || label === "ease" ? P.warn : P.muted;
+  const text =
+    label === "ontarget"
+      ? "On target"
+      : label === "deeper"
+      ? "A little deeper"
+      : label === "ease"
+      ? "Ease back a touch"
+      : "Find your spot";
+  return (
+    <Card className="px-4 py-3">
+      <div
+        className="flex items-baseline justify-between text-[10px] uppercase tracking-widest font-semibold"
+        style={{ color: tone }}
+      >
+        <span>{text}</span>
+        <span style={{ color: P.muted, fontFamily: "ui-monospace, monospace" }}>
+          {fmt(pitch)}° · target {fmt(target)}°
+        </span>
+      </div>
+      <div
+        className="relative mt-2"
+        style={{ height: 10, borderRadius: 5, background: P.hairline, overflow: "hidden" }}
+      >
+        <div
+          style={{
+            position: "absolute",
+            left: `${bandLeft * 100}%`,
+            width: `${(bandRight - bandLeft) * 100}%`,
+            top: 0,
+            bottom: 0,
+            background: "rgba(122,168,132,0.45)",
+          }}
+        />
+        <div
+          style={{
+            position: "absolute",
+            left: `${dotPos * 100}%`,
+            top: -3,
+            width: 16,
+            height: 16,
+            borderRadius: 8,
+            background: tone === P.muted ? P.skyDeep : tone,
+            border: "2px solid #fff",
+            boxShadow: "0 0 0 1px rgba(0,0,0,0.08)",
+            transform: "translateX(-50%)",
+            transition: "left 0.15s ease-out",
+          }}
+        />
+      </div>
+    </Card>
+  );
+}
+
+// Step counts across phases:
+//   placement = 1, calibration = 2, learn = 3, session = 4
 function Header({
   back,
   step,
@@ -501,6 +612,7 @@ export default function Page() {
   const gravityZRef = useRef(0);
 
   const [baseline, setBaseline] = useState<Baseline | null>(null);
+  const [plateau, setPlateau] = useState<Plateau | null>(null);
   const [holdTarget, setHoldTarget] = useState<number>(20);
   const [holdsPerSession, setHoldsPerSession] = useState<number>(3);
   const [voiceOn, setVoiceOn] = useState(true);
@@ -623,6 +735,7 @@ export default function Page() {
 
   const restart = () => {
     setBaseline(null);
+    setPlateau(null);
     setHolds([]);
     traceRef.current = [];
     setPhase("welcome");
@@ -676,16 +789,34 @@ export default function Page() {
             onContinue={(b) => {
               setBaseline(b);
               traceRef.current = [];
-              setPhase("session");
+              setPhase("learn");
             }}
             onBack={() => setPhase("placement")}
             cue={cue}
           />
         )}
 
-        {phase === "session" && baseline && (
+        {phase === "learn" && baseline && (
+          <Learn
+            baseline={baseline}
+            pitch={pitch}
+            pitchRef={pitchRef}
+            traceRef={traceRef}
+            cue={cue}
+            buzz={buzz}
+            onContinue={(p) => {
+              setPlateau(p);
+              traceRef.current = [];
+              setPhase("session");
+            }}
+            onAbort={restart}
+          />
+        )}
+
+        {phase === "session" && baseline && plateau && (
           <Session
             baseline={baseline}
+            plateau={plateau}
             holdTarget={holdTarget}
             holdsPerSession={holdsPerSession}
             pitch={pitch}
@@ -983,7 +1114,7 @@ function Placement({
   return (
     <div className="relative flex-1 flex flex-col" style={{ overflow: "hidden" }}>
       <Blobs />
-      <Header back={onBack} step={1} totalSteps={3} />
+      <Header back={onBack} step={1} totalSteps={4} />
       <div
         className="relative flex-1 flex flex-col"
         style={{ padding: "32px 28px 0", zIndex: 1 }}
@@ -1149,7 +1280,7 @@ function Calibration({
   return (
     <div className="relative flex-1 flex flex-col" style={{ overflow: "hidden" }}>
       <Blobs />
-      <Header back={onBack} step={2} totalSteps={3} />
+      <Header back={onBack} step={2} totalSteps={4} />
       <div
         className="relative flex-1 flex flex-col"
         style={{ padding: "32px 28px 0", zIndex: 1 }}
@@ -1233,6 +1364,352 @@ function Calibration({
   );
 }
 
+// ─── Learn — three comfortable holds → averaged target plateau ─────────────
+function Learn({
+  baseline,
+  pitch,
+  pitchRef,
+  traceRef,
+  cue,
+  buzz,
+  onContinue,
+  onAbort,
+}: {
+  baseline: Baseline;
+  pitch: number;
+  pitchRef: React.RefObject<number>;
+  traceRef: React.RefObject<{ t: number; p: number }[]>;
+  cue: (k: PhraseKey) => void;
+  buzz: (p: number | number[]) => void;
+  onContinue: (p: Plateau) => void;
+  onAbort: () => void;
+}) {
+  type Stage = "intro" | "idle" | "active" | "exhale";
+  const [stage, setStage] = useState<Stage>("intro");
+  const [holdIdx, setHoldIdx] = useState(0);
+  const [isStable, setIsStable] = useState(false);
+  const [breathScale, setBreathScale] = useState(0);
+  const [stableSec, setStableSec] = useState(0);
+  const [longestRunSec, setLongestRunSec] = useState(0);
+
+  const peaksRef = useRef<{ plateauPitch: number; plateauSD: number }[]>([]);
+  const cueRef = useRef(cue);
+  const buzzRef = useRef(buzz);
+  useEffect(() => {
+    cueRef.current = cue;
+  });
+  useEffect(() => {
+    buzzRef.current = buzz;
+  });
+
+  const holdStartRef = useRef<number | null>(null);
+  const lastSampleAtRef = useRef(0);
+  const stableMsAccumRef = useRef(0);
+  const currentRunStartRef = useRef<number | null>(null);
+  const longestRunMsRef = useRef(0);
+  const firstLockAtRef = useRef<number | null>(null);
+  const candidateStateRef = useRef<{ wantStable: boolean; since: number }>({ wantStable: false, since: 0 });
+  const releaseCandidateSinceRef = useRef<number | null>(null);
+
+  const reset = useCallback(() => {
+    stableMsAccumRef.current = 0;
+    currentRunStartRef.current = null;
+    longestRunMsRef.current = 0;
+    firstLockAtRef.current = null;
+    candidateStateRef.current = { wantStable: false, since: 0 };
+    releaseCandidateSinceRef.current = null;
+    setIsStable(false);
+    setBreathScale(0);
+    setStableSec(0);
+    setLongestRunSec(0);
+  }, []);
+
+  const finalize = useCallback(() => {
+    const peaks = peaksRef.current;
+    if (peaks.length < 2) return;
+    const target = peaks.reduce((a, b) => a + b.plateauPitch, 0) / peaks.length;
+    const meanSq =
+      peaks.reduce((a, b) => a + (b.plateauPitch - target) ** 2, 0) / peaks.length;
+    const acrossSD = Math.sqrt(meanSq);
+    const tolerance = Math.max(TOLERANCE_FLOOR_DEG, acrossSD * TOLERANCE_SD_MULT);
+    cueRef.current("learn_target_locked");
+    onContinue({
+      targetPitch: target,
+      toleranceDeg: tolerance,
+      calibrationHolds: peaks,
+    });
+  }, [onContinue]);
+
+  const finishHold = useCallback(() => {
+    const start = holdStartRef.current ?? performance.now();
+    const totalMs = performance.now() - start;
+    const summary = summarizeRange(
+      traceRef.current,
+      start + Math.max(0, totalMs - 3000),
+      start + totalMs,
+    );
+    if (summary && longestRunMsRef.current > 1500) {
+      peaksRef.current.push({ plateauPitch: summary.median, plateauSD: summary.sd });
+    }
+    cueRef.current("release_breath");
+    buzzRef.current(40);
+    setStage("exhale");
+    setTimeout(() => {
+      const next = peaksRef.current.length;
+      if (next >= LEARN_HOLDS) {
+        finalize();
+      } else {
+        if (next === 1) cueRef.current("learn_got_one");
+        else if (next === 2) cueRef.current("learn_got_two");
+        setHoldIdx(next);
+        reset();
+        setStage("idle");
+      }
+    }, 4500);
+  }, [traceRef, reset, finalize]);
+
+  useEffect(() => {
+    if (stage !== "active") return;
+    const id = setInterval(() => {
+      const now = performance.now();
+      const dt = lastSampleAtRef.current ? now - lastSampleAtRef.current : 0;
+      lastSampleAtRef.current = now;
+      const dev = pitchRef.current - baseline.meanPitch;
+      const absDev = Math.abs(dev);
+      setBreathScale(Math.min(1, absDev / 12));
+      const sd = rollingSD(traceRef.current, STABILITY_WINDOW_MS);
+      const adaptive = Math.min(
+        STABLE_SD_CEILING,
+        Math.max(STABLE_SD_FLOOR, baseline.breathingSD * STABLE_SD_FRAC_OF_BASELINE),
+      );
+      const wantStable = sd < adaptive;
+      const cs = candidateStateRef.current;
+      if (wantStable !== cs.wantStable) {
+        candidateStateRef.current = { wantStable, since: now };
+      }
+      const heldFor = now - candidateStateRef.current.since;
+      const debounceMs = wantStable ? STABLE_DEBOUNCE_MS : DRIFT_DEBOUNCE_MS;
+      if (heldFor >= debounceMs) {
+        if (wantStable && !isStable) {
+          setIsStable(true);
+          if (firstLockAtRef.current == null) firstLockAtRef.current = now;
+          currentRunStartRef.current = now;
+          cueRef.current("locked_in");
+          buzzRef.current(50);
+        } else if (!wantStable && isStable) {
+          setIsStable(false);
+          if (currentRunStartRef.current != null) {
+            const runMs = now - currentRunStartRef.current;
+            if (runMs > longestRunMsRef.current) {
+              longestRunMsRef.current = runMs;
+              setLongestRunSec(runMs / 1000);
+            }
+            currentRunStartRef.current = null;
+          }
+        }
+      }
+      if (isStable) {
+        stableMsAccumRef.current += dt;
+        setStableSec(stableMsAccumRef.current / 1000);
+        if (currentRunStartRef.current != null) {
+          const runMs = now - currentRunStartRef.current;
+          if (runMs > longestRunMsRef.current) {
+            longestRunMsRef.current = runMs;
+            setLongestRunSec(runMs / 1000);
+          }
+        }
+      }
+      if (firstLockAtRef.current != null && sd > adaptive * 3) {
+        if (releaseCandidateSinceRef.current == null) {
+          releaseCandidateSinceRef.current = now;
+        } else if (now - releaseCandidateSinceRef.current > RELEASE_SUSTAIN_MS) {
+          finishHold();
+          return;
+        }
+      } else {
+        releaseCandidateSinceRef.current = null;
+      }
+    }, 100);
+    return () => clearInterval(id);
+  }, [stage, baseline, isStable, pitchRef, traceRef, finishHold]);
+
+  const startHold = () => {
+    reset();
+    setStage("active");
+    holdStartRef.current = performance.now();
+    lastSampleAtRef.current = performance.now();
+    cueRef.current("inhale_cue");
+  };
+
+  const orbMood: OrbMood = stage === "active" ? (isStable ? "calm" : "active") : "calm";
+  const orbDrifting = stage === "active" && !isStable && firstLockAtRef.current != null;
+
+  return (
+    <div className="relative flex-1 flex flex-col" style={{ overflow: "hidden" }}>
+      <div
+        style={{
+          position: "absolute",
+          top: "20%",
+          left: "50%",
+          transform: "translate(-50%, 0)",
+          width: 480,
+          height: 480,
+          borderRadius: "50%",
+          background: `radial-gradient(circle, ${
+            orbDrifting ? "rgba(217,148,102,0.4)" : P.halo
+          } 0%, transparent 60%)`,
+          filter: "blur(8px)",
+          opacity: stage === "active" ? 1 : 0.6,
+          transition: "opacity 1s ease, background 0.6s ease",
+          pointerEvents: "none",
+        }}
+      />
+      <Header back={onAbort} step={3} totalSteps={4} />
+      <div
+        className="relative flex-1 flex flex-col items-center justify-center"
+        style={{ padding: "0 32px", zIndex: 2 }}
+      >
+        {stage === "intro" ? (
+          <>
+            <Orb size={220} mood="calm" />
+            <h2
+              style={{
+                fontSize: 28,
+                fontWeight: 700,
+                color: P.ink,
+                marginTop: 24,
+                textAlign: "center",
+                letterSpacing: -0.6,
+                lineHeight: 1.1,
+              }}
+            >
+              Find your spot
+            </h2>
+            <p
+              style={{
+                fontSize: 14,
+                color: P.ink2,
+                marginTop: 12,
+                textAlign: "center",
+                maxWidth: 320,
+              }}
+            >
+              Three comfortable chest holds. Reach a depth you can hold steady — we&apos;ll
+              average them to set your target. No need to push.
+            </p>
+          </>
+        ) : (
+          <>
+            <Orb
+              size={220}
+              breathScale={stage === "active" ? breathScale : undefined}
+              freeze={stage === "active" && isStable}
+              mood={orbDrifting ? "drifting" : orbMood}
+              secondsLeft={null}
+            />
+            <div className="mt-8 text-center">
+              <div
+                style={{
+                  fontSize: 11,
+                  letterSpacing: 3,
+                  textTransform: "uppercase",
+                  color: P.skyDeep,
+                  fontWeight: 700,
+                }}
+              >
+                Hold {holdIdx + 1} of {LEARN_HOLDS}
+              </div>
+              <div
+                style={{
+                  fontSize: 32,
+                  color: P.ink,
+                  fontWeight: 700,
+                  marginTop: 4,
+                  letterSpacing: -1,
+                }}
+              >
+                {stage === "active"
+                  ? isStable
+                    ? "Hold steady"
+                    : firstLockAtRef.current
+                    ? "Find it again"
+                    : "Inhale and hold"
+                  : stage === "exhale"
+                  ? "Release"
+                  : "Comfortable hold"}
+              </div>
+            </div>
+          </>
+        )}
+      </div>
+      <div style={{ padding: "0 24px 32px", zIndex: 2, position: "relative" }}>
+        {stage === "intro" && (
+          <Btn
+            onClick={() => {
+              cueRef.current("learn_intro");
+              setStage("idle");
+            }}
+          >
+            I&apos;m ready
+          </Btn>
+        )}
+        {stage === "idle" && (
+          <Card className="p-5">
+            <div
+              className="text-[10px] uppercase tracking-widest font-semibold"
+              style={{ color: P.muted }}
+            >
+              Comfortable hold {holdIdx + 1} of {LEARN_HOLDS}
+            </div>
+            <div className="text-sm mt-1" style={{ color: P.ink2 }}>
+              Reach a depth you can hold steady, then keep it there.
+            </div>
+            <div className="mt-4">
+              <Btn onClick={startHold}>Start hold {holdIdx + 1}</Btn>
+            </div>
+          </Card>
+        )}
+        {stage === "active" && (
+          <Card className="p-4">
+            <div className="flex justify-between text-xs" style={{ color: P.muted }}>
+              <span>{isStable ? "Locked in" : "Finding…"}</span>
+              <span style={{ fontVariantNumeric: "tabular-nums" }}>
+                stable {fmt(stableSec, 1)}s · best {fmt(longestRunSec, 1)}s · pitch{" "}
+                {fmt(pitch)}°
+              </span>
+            </div>
+            <div className="mt-3">
+              <Btn variant="ghost" onClick={finishHold}>
+                End hold
+              </Btn>
+            </div>
+          </Card>
+        )}
+        {stage === "exhale" && (
+          <Card className="p-5 text-center">
+            <div
+              style={{
+                fontSize: 11,
+                letterSpacing: 2,
+                textTransform: "uppercase",
+                color: P.skyDeep,
+                fontWeight: 700,
+              }}
+            >
+              Got it
+            </div>
+            <div style={{ fontSize: 18, color: P.ink, fontWeight: 600, marginTop: 4 }}>
+              {peaksRef.current.length >= LEARN_HOLDS
+                ? "Locking in your target…"
+                : `${LEARN_HOLDS - peaksRef.current.length} more like that`}
+            </div>
+          </Card>
+        )}
+      </div>
+    </div>
+  );
+}
+
 // ─── Session — the heart of the app ─────────────────────────────────────────
 type SessionStage = "idle" | "active" | "exhale" | "between";
 
@@ -1241,6 +1718,7 @@ const RELEASE_SUSTAIN_MS = 1500; // movement (SD spike) sustained = release
 
 function Session({
   baseline,
+  plateau,
   holdTarget,
   holdsPerSession,
   pitch,
@@ -1252,6 +1730,7 @@ function Session({
   onAbort,
 }: {
   baseline: Baseline;
+  plateau: Plateau;
   holdTarget: number;
   holdsPerSession: number;
   pitch: number;
@@ -1295,6 +1774,14 @@ function Session({
   const targetCueFiredRef = useRef(false);
   const targetReachedAtRef = useRef<number | null>(null);
   const releaseCandidateSinceRef = useRef<number | null>(null);
+  // Position-match (stable AND within tolerance of session target)
+  const onTargetMsAccumRef = useRef(0);
+  const onTargetRunStartRef = useRef<number | null>(null);
+  const longestOnTargetMsRef = useRef(0);
+  const lastPositionCueRef = useRef<{ t: number; cue: string }>({ t: 0, cue: "" });
+  const [onTargetSec, setOnTargetSec] = useState(0);
+  const [longestOnTargetSec, setLongestOnTargetSec] = useState(0);
+  const [positionLabel, setPositionLabel] = useState<"deeper" | "ease" | "ontarget" | "—">("—");
 
   const resetHoldState = useCallback(() => {
     algoEventsRef.current = [];
@@ -1308,11 +1795,18 @@ function Session({
     targetCueFiredRef.current = false;
     targetReachedAtRef.current = null;
     releaseCandidateSinceRef.current = null;
+    onTargetMsAccumRef.current = 0;
+    onTargetRunStartRef.current = null;
+    longestOnTargetMsRef.current = 0;
+    lastPositionCueRef.current = { t: 0, cue: "" };
     setStableSec(0);
     setLongestRunSec(0);
     setIsStable(false);
     setReachedTargetThisHold(false);
     setBreathScale(0);
+    setOnTargetSec(0);
+    setLongestOnTargetSec(0);
+    setPositionLabel("—");
   }, []);
 
   const logEvent = useCallback((type: string, meta?: unknown) => {
@@ -1350,7 +1844,10 @@ function Session({
         firstLockAtRef.current != null ? (firstLockAtRef.current - start) / 1000 : null,
       plateauPitch,
       plateauSD,
-      reachedTarget: longestRunMsRef.current / 1000 >= holdTarget,
+      onTargetSec: onTargetMsAccumRef.current / 1000,
+      longestOnTargetRunSec: longestOnTargetMsRef.current / 1000,
+      // "Reached target" = sustained stable+on-target for >= holdTarget seconds.
+      reachedTarget: longestOnTargetMsRef.current / 1000 >= holdTarget,
     };
     holdsRef.current.push(h);
     logEvent("finish");
@@ -1467,6 +1964,10 @@ function Session({
         }
       }
 
+      // Position match: how far from session target is the current pitch
+      const targetDelta = pitchRef.current - plateau.targetPitch;
+      const onTarget = Math.abs(targetDelta) <= plateau.toleranceDeg;
+
       if (isStable) {
         stableMsAccumRef.current += dt;
         setStableSec(stableMsAccumRef.current / 1000);
@@ -1477,9 +1978,49 @@ function Session({
             setLongestRunSec(runMs / 1000);
           }
         }
+        // Position cues — stable but off-target → tell them which way.
+        // Throttled to 2.5s minimum gap between distinct cues.
+        const cueGap = now - lastPositionCueRef.current.t;
+        if (!onTarget && cueGap > 2500) {
+          if (targetDelta < 0) {
+            // Below target depth — need to inhale more
+            if (lastPositionCueRef.current.cue !== "deeper") {
+              lastPositionCueRef.current = { t: now, cue: "deeper" };
+              cueRef.current("go_deeper");
+              logEvent("cue_deeper", { delta: +targetDelta.toFixed(2) });
+            }
+          } else {
+            // Above target depth — need to exhale slightly
+            if (lastPositionCueRef.current.cue !== "ease") {
+              lastPositionCueRef.current = { t: now, cue: "ease" };
+              cueRef.current("ease_back");
+              logEvent("cue_ease", { delta: +targetDelta.toFixed(2) });
+            }
+          }
+        } else if (onTarget && lastPositionCueRef.current.cue !== "ontarget") {
+          lastPositionCueRef.current = { t: now, cue: "ontarget" };
+          // Only speak "right there" if we just crossed in from off-target.
+          if (cueGap > 1500) cueRef.current("right_there");
+          buzzRef.current(40);
+        }
+        setPositionLabel(onTarget ? "ontarget" : targetDelta < 0 ? "deeper" : "ease");
+      } else {
+        setPositionLabel("—");
+      }
+
+      // On-target time accumulation: stable AND on-target.
+      if (isStable && onTarget) {
+        onTargetMsAccumRef.current += dt;
+        setOnTargetSec(onTargetMsAccumRef.current / 1000);
+        if (onTargetRunStartRef.current == null) onTargetRunStartRef.current = now;
+        const onRunMs = now - onTargetRunStartRef.current;
+        if (onRunMs > longestOnTargetMsRef.current) {
+          longestOnTargetMsRef.current = onRunMs;
+          setLongestOnTargetSec(onRunMs / 1000);
+        }
         if (
           !targetCueFiredRef.current &&
-          longestRunMsRef.current / 1000 >= holdTarget
+          longestOnTargetMsRef.current / 1000 >= holdTarget
         ) {
           targetCueFiredRef.current = true;
           targetReachedAtRef.current = now;
@@ -1488,6 +2029,8 @@ function Session({
           cueRef.current("target_reached");
           buzzRef.current([100, 50, 100, 50, 250]);
         }
+      } else {
+        onTargetRunStartRef.current = null;
       }
 
       // Auto-release path 1: rolling SD jumps WELL above the adaptive
@@ -1518,7 +2061,7 @@ function Session({
       }
     }, 100);
     return () => clearInterval(id);
-  }, [stage, baseline, holdTarget, isStable, pitchRef, traceRef, finishHold, logEvent]);
+  }, [stage, baseline, plateau, holdTarget, isStable, pitchRef, traceRef, finishHold, logEvent]);
 
   const startHold = () => {
     resetHoldState();
@@ -1541,8 +2084,17 @@ function Session({
   const orbDrifting =
     stage === "active" && !isStable && firstLockAtRef.current != null;
 
-  const targetPct = Math.min(100, (longestRunSec / holdTarget) * 100);
-  const stablePct = Math.min(100, (stableSec / holdTarget) * 100);
+  // Progress = stable AND on-target time relative to holdTarget. The stable-only
+  // run is a secondary track on the meter — they get partial credit for
+  // holding still even if not on target yet.
+  const targetPct = Math.min(100, (longestOnTargetSec / holdTarget) * 100);
+  const stablePct = Math.min(100, (longestRunSec / holdTarget) * 100);
+  // Target-ring breath scale: where the orb should sit when on target. The
+  // patient inhales until their live orb fills this ring.
+  const targetBreathScale = Math.min(
+    1,
+    Math.abs(plateau.targetPitch - baseline.meanPitch) / 12,
+  );
 
   return (
     <div className="relative flex-1 flex flex-col" style={{ overflow: "hidden" }}>
@@ -1637,14 +2189,19 @@ function Session({
           <Orb
             size={220}
             breathScale={stage === "active" ? breathScale : undefined}
-            freeze={stage === "active" && isStable}
+            freeze={stage === "active" && isStable && positionLabel === "ontarget"}
             mood={orbDrifting ? "drifting" : orbMood}
+            targetScale={stage === "active" ? targetBreathScale : undefined}
             secondsLeft={
-              stage === "active" && isStable
-                ? Math.max(0, Math.ceil(holdTarget - longestRunSec))
+              stage === "active" && isStable && positionLabel === "ontarget"
+                ? Math.max(0, Math.ceil(holdTarget - longestOnTargetSec))
                 : null
             }
-            label={stage === "active" && isStable ? "to target" : undefined}
+            label={
+              stage === "active" && isStable && positionLabel === "ontarget"
+                ? "on target"
+                : undefined
+            }
           />
         </div>
         <div className="mt-8 text-center">
@@ -1695,22 +2252,33 @@ function Session({
         </div>
       </div>
 
-      {/* Stable time card */}
+      {/* On-target time card */}
       <div style={{ padding: "0 24px 32px", zIndex: 2, position: "relative" }}>
+        {/* Position indicator — only during active holds */}
+        {stage === "active" && firstLockAtRef.current != null && (
+          <div className="mb-3">
+            <PositionMeter
+              pitch={pitch}
+              target={plateau.targetPitch}
+              tolerance={plateau.toleranceDeg}
+              label={positionLabel}
+            />
+          </div>
+        )}
         <Card className="p-5">
           <div className="flex items-baseline justify-between">
             <div className="text-[10px] uppercase tracking-widest font-semibold" style={{ color: P.muted }}>
-              Stable time
+              On-target time
             </div>
             <div className="text-[10px] uppercase tracking-widest font-semibold" style={{ color: P.muted }}>
-              Target {holdTarget}s
+              Target {holdTarget}s · ±{fmt(plateau.toleranceDeg, 1)}°
             </div>
           </div>
           <div className="flex items-baseline gap-2 mt-1">
             <div style={{ fontSize: 36, fontWeight: 700, color: P.ink, letterSpacing: -1, fontVariantNumeric: "tabular-nums" }}>
-              {fmt(longestRunSec, 1)}
+              {fmt(longestOnTargetSec, 1)}
             </div>
-            <div style={{ fontSize: 13, color: P.ink2 }}>s longest run</div>
+            <div style={{ fontSize: 13, color: P.ink2 }}>s longest on target</div>
           </div>
           <div className="mt-3 relative" style={{ height: 8, borderRadius: 4, background: P.hairline, overflow: "hidden" }}>
             <div
@@ -1738,9 +2306,9 @@ function Session({
             />
           </div>
           <div className="mt-2 flex justify-between text-xs" style={{ color: P.muted, fontVariantNumeric: "tabular-nums" }}>
-            <span>{fmt(stableSec, 1)}s total stable</span>
+            <span>{fmt(longestRunSec, 1)}s stable · {fmt(onTargetSec, 1)}s on-target</span>
             <span>
-              tilt {fmt(pitch)}° · drift {driftEventsRef.current}
+              tilt {fmt(pitch)}° · target {fmt(plateau.targetPitch)}°
             </span>
           </div>
           <div className="mt-3">
@@ -1775,12 +2343,21 @@ function Complete({
   onDone: () => void;
 }) {
   const reached = holds.filter((h) => h.reachedTarget).length;
-  const meanLongest =
-    holds.length > 0 ? holds.reduce((a, h) => a + h.longestRunSec, 0) / holds.length : 0;
-  const totalStable = holds.reduce((a, h) => a + h.stableSec, 0);
+  const meanOnTarget =
+    holds.length > 0
+      ? holds.reduce((a, h) => a + h.longestOnTargetRunSec, 0) / holds.length
+      : 0;
   const meanPlateauPitch = (() => {
     const pp = holds.map((h) => h.plateauPitch).filter((v): v is number => v != null);
     return pp.length ? pp.reduce((a, b) => a + b, 0) / pp.length : null;
+  })();
+  // Reproducibility = SD of plateau pitch across the practice holds. Lower is
+  // better. This is the headline clinical metric.
+  const reproSD = (() => {
+    const pp = holds.map((h) => h.plateauPitch).filter((v): v is number => v != null);
+    if (pp.length < 2) return null;
+    const m = pp.reduce((a, b) => a + b, 0) / pp.length;
+    return Math.sqrt(pp.reduce((a, b) => a + (b - m) ** 2, 0) / pp.length);
   })();
   const driftTotal = holds.reduce((a, h) => a + h.driftEvents, 0);
 
@@ -1857,8 +2434,8 @@ function Complete({
         <Card className="mt-7 p-5">
           <div className="flex justify-around">
             {[
-              [`${fmt(meanLongest, 1)}s`, "avg longest run"],
-              [`${fmt(totalStable, 0)}s`, "total stable"],
+              [`${fmt(meanOnTarget, 1)}s`, "avg on-target"],
+              [reproSD != null ? `±${fmt(reproSD, 2)}°` : "—", "reproducibility"],
               [meanPlateauPitch != null ? `${fmt(meanPlateauPitch)}°` : "—", "avg plateau"],
             ].map(([v, k]) => (
               <div key={k} className="text-center">
@@ -1894,7 +2471,7 @@ function Complete({
             </div>
             <div className="mt-3 flex items-end gap-2.5" style={{ height: 60 }}>
               {holds.map((h, i) => {
-                const pct = Math.min(100, (h.longestRunSec / holdTarget) * 100);
+                const pct = Math.min(100, (h.longestOnTargetRunSec / holdTarget) * 100);
                 return (
                   <div key={i} className="flex-1 flex flex-col items-center gap-1.5">
                     <div className="w-full flex items-end" style={{ height: 50 }}>
@@ -1917,7 +2494,7 @@ function Complete({
                         fontVariantNumeric: "tabular-nums",
                       }}
                     >
-                      {fmt(h.longestRunSec, 0)}s
+                      {fmt(h.longestOnTargetRunSec, 0)}s
                     </div>
                   </div>
                 );

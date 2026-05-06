@@ -29,6 +29,13 @@ const PHRASES = {
   target_reached: "Target reached. Great hold.",
   release_breath: "Release. Breathe normally.",
   session_done: "Session complete. Great work.",
+  learn_intro: "Three comfortable holds. Find a depth you can hold steady.",
+  learn_got_one: "Good. Two more like that.",
+  learn_got_two: "One more comfortable hold.",
+  learn_target_locked: "Target locked. Let's match it.",
+  go_deeper: "A little deeper.",
+  ease_back: "Ease back a touch.",
+  right_there: "Right there. Hold steady.",
 };
 
 // Default voice IDs from ElevenLabs catalogue (calm female narrators).
