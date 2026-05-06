@@ -320,9 +320,10 @@ function Orb({
   const live = breathScale ?? 0;
   if (!freeze) frozenRef.current = live;
   const breath = freeze ? frozenRef.current : live;
-  // Map 0..1 → 0.55..1.08 (clamp). Below 0.05 we treat as "rest" baseline.
+  // Map 0..1 → 0.45..1.10 — wider dynamic range so the rest pose is visibly
+  // small and full inhale is visibly full.
   const scale =
-    breathScale == null ? 0.78 : 0.55 + Math.min(1, Math.max(0, breath)) * 0.53;
+    breathScale == null ? 0.55 : 0.45 + Math.min(1, Math.max(0, breath)) * 0.65;
   // Snappier transition while actively tracking, gentler when frozen / resting.
   const dur = breathScale == null ? "0.8s" : freeze ? "0.6s" : "0.25s";
   const haloColor = mood === "drifting" ? "rgba(217,148,102,0.55)" : P.halo;
@@ -997,12 +998,13 @@ function Placement({
             margin: 0,
           }}
         >
-          Lay back, balance the phone on your tummy
+          Lay back, place the phone over your sternum
         </h2>
         <p style={{ fontSize: 14, lineHeight: 1.55, color: P.ink2, marginTop: 12 }}>
-          Phone in <strong>portrait</strong>, screen up. The <strong>top edge</strong> just
-          below your sternum, the <strong>bottom edge</strong> on your lower belly. The phone
-          should bridge the chest-to-belly seam — that&apos;s how we feel your breath rise.
+          Phone in <strong>portrait</strong>, screen up. The <strong>top edge</strong> resting
+          on your sternum, <strong>bottom edge</strong> on your upper belly. Breathe with
+          your <strong>chest</strong>, not just your belly — that&apos;s the hold your
+          radiation team is teaching you.
         </p>
         <Card
           className="mt-6 flex items-center justify-center relative"
@@ -1024,8 +1026,8 @@ function Placement({
         <div className="mt-4 flex flex-wrap gap-2">
           {[
             "Portrait",
-            "Top edge under sternum",
-            "Bottom edge on belly",
+            "Top edge on sternum",
+            "Chest-led breath",
             "Loose clothing",
           ].map((t) => (
             <Pill key={t}>{t}</Pill>
@@ -1413,11 +1415,13 @@ function Session({
       const absDev = Math.abs(dev);
       peakDevRef.current = Math.max(peakDevRef.current, absDev);
 
-      // Live breath scale 0..1 — relative to running peak with a tiny floor
-      // (0.5°). Patients vary wildly in how much their phone tilts: real
-      // recordings show some get 1°, others might get 10°. Let it self-scale.
-      const ref = Math.max(0.5, peakDevRef.current);
-      setBreathScale(Math.min(1, absDev / ref));
+      // Live breath scale 0..1 — fixed 12° reference (typical chest-mode peak).
+      // Earlier we tracked running peak, but absDev always equals peak on the
+      // current tick → ratio jumps straight to 1.0 and the orb never animates
+      // its growth. Fixed reference makes the orb visibly grow during inhale
+      // for both belly (peak ~5° → 42% scale) and chest (peak ~12° → full)
+      // modes.
+      setBreathScale(Math.min(1, absDev / 12));
 
       // Stability detection. Adaptive threshold = half the breathing-baseline
       // SD measured during calibrate, clamped to a floor/ceiling.
