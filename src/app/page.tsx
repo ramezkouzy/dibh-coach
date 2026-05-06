@@ -998,13 +998,13 @@ function Placement({
             margin: 0,
           }}
         >
-          Lay back, place the phone over your sternum
+          Lay back, anchor the phone on your sternum
         </h2>
         <p style={{ fontSize: 14, lineHeight: 1.55, color: P.ink2, marginTop: 12 }}>
-          Phone in <strong>portrait</strong>, screen up. The <strong>top edge</strong> resting
-          on your sternum, <strong>bottom edge</strong> on your upper belly. Breathe with
-          your <strong>chest</strong>, not just your belly — that&apos;s the hold your
-          radiation team is teaching you.
+          Phone in <strong>portrait</strong>, screen up. The <strong>charging-port edge</strong>
+          (bottom) resting on your sternum; let the rest of the phone extend down across
+          your upper belly. Breathe with your <strong>chest</strong>, not just your belly —
+          that&apos;s the hold your radiation team is teaching you.
         </p>
         <Card
           className="mt-6 flex items-center justify-center relative"
@@ -1026,7 +1026,7 @@ function Placement({
         <div className="mt-4 flex flex-wrap gap-2">
           {[
             "Portrait",
-            "Top edge on sternum",
+            "Port edge on sternum",
             "Chest-led breath",
             "Loose clothing",
           ].map((t) => (
