@@ -3,6 +3,41 @@
 Deferred features, known gaps, and open product questions, ordered roughly
 by impact-per-effort.
 
+## Pick this up first next session — broken behaviour
+
+- [ ] **`right_there` fires too early during inhale ramp.** Reported
+      symptom: as soon as the patient starts inhaling, the app says
+      "right there, hold steady." Almost certainly because the position
+      cue fires the instant the live pitch crosses into the
+      $\pm$tolerance band, while the patient is still ramping through
+      it on the way to apex. The rolling 2-s SD can be small during a
+      slow controlled inhale (pitch is changing but smoothly) so the
+      stability gate doesn't catch it.
+
+      **Where to look:** `Session` polling loop in `src/app/page.tsx`,
+      the block guarded by `if (isStable) { ... }`. Specifically the
+      `onTarget && lastPositionCueRef.current.cue !== "ontarget"` branch
+      that emits `right_there`.
+
+      **Likely fixes, in order of preference:**
+      1. Require `firstLockAtRef.current != null && (now - firstLockAtRef) > 800ms`
+         before any position cue fires. Wait for the stability lock to
+         settle for ~1 s before commenting on position.
+      2. Or: add a separate "on-target dwell" debounce — the patient
+         must be on-target for $\geq$1 s before `right_there` fires (same
+         pattern as the stability lock debounce).
+      3. Or: require the rolling SD to also be below a tighter
+         threshold (e.g., $0.5 \times$ adaptive) for the position cues
+         specifically — eliminate the slow-ramp false positive.
+      4. Belt-and-braces: do (1) plus (2). Cheap, robust.
+
+      **Validation plan:** record a guided session with deliberate slow
+      inhales and confirm `right_there` fires only after the apex
+      plateau, never during the ramp. Run the recording through
+      `scripts/analyze.py` to confirm the SD curve during ramp is in
+      fact below the adaptive threshold (which is the proximate cause).
+
+
 ## Near-term — algorithmic refinement
 
 - [ ] **Adaptive tolerance from Learn phase variance.** Currently
