@@ -40,6 +40,58 @@ function fmt(n: number, digits = 1) {
   return n.toFixed(digits);
 }
 
+// Count zero-crossings of (signal - mean). Each full breath cycle has 2 crossings.
+// Returns estimated breaths per minute over the given duration.
+function estimateBreathRate(samples: number[], durationSec: number) {
+  if (samples.length < 4 || durationSec <= 0) return 0;
+  const mean = samples.reduce((a, b) => a + b, 0) / samples.length;
+  // Hysteresis to avoid noise crossings: only count when we move past mean ± 0.2°.
+  const hys = 0.2;
+  let crossings = 0;
+  let state: "above" | "below" | "neutral" = "neutral";
+  for (const v of samples) {
+    if (state !== "above" && v > mean + hys) {
+      if (state === "below") crossings++;
+      state = "above";
+    } else if (state !== "below" && v < mean - hys) {
+      if (state === "above") crossings++;
+      state = "below";
+    }
+  }
+  const breaths = crossings / 2;
+  return (breaths * 60) / durationSec;
+}
+
+// Find the most stable contiguous window (by SD) of approximately `windowSec`
+// seconds inside a time-tagged sample buffer. Returns the median and SD of
+// that window, plus its start/end timestamps. If nothing usable, returns null.
+function findStablePlateau(
+  data: { t: number; p: number }[],
+  windowSec = 4,
+): { median: number; sd: number; tStart: number; tEnd: number } | null {
+  if (data.length < 8) return null;
+  const winMs = windowSec * 1000;
+  let best: { median: number; sd: number; tStart: number; tEnd: number } | null = null;
+  // Slide one sample at a time. Cheap: O(n*win) but our win is small (<200 samples).
+  for (let i = 0; i < data.length; i++) {
+    const tEnd = data[i].t + winMs;
+    let j = i;
+    while (j < data.length && data[j].t < tEnd) j++;
+    if (j - i < 8) continue;
+    const slice = data.slice(i, j).map((d) => d.p);
+    const m = slice.reduce((a, b) => a + b, 0) / slice.length;
+    const variance =
+      slice.reduce((a, b) => a + (b - m) ** 2, 0) / slice.length;
+    const sd = Math.sqrt(variance);
+    if (!best || sd < best.sd) {
+      const sorted = [...slice].sort((a, b) => a - b);
+      const median = sorted[Math.floor(sorted.length / 2)];
+      best = { median, sd, tStart: data[i].t, tEnd: data[j - 1].t };
+    }
+  }
+  return best;
+}
+
 export default function Page() {
   const [phase, setPhase] = useState<Phase>("intro");
   const [pitch, setPitch] = useState(0);
@@ -54,6 +106,10 @@ export default function Page() {
   const [holds, setHolds] = useState<Hold[]>([]);
 
   // ---- sensor wiring -----------------------------------------------------
+  // We throttle React display updates to ~10 fps so the parent does not re-render
+  // at sensor cadence (~60 Hz). The canvas trace pulls from traceRef directly,
+  // so the visual smoothness is unaffected.
+  const lastDisplayUpdateRef = useRef(0);
   useEffect(() => {
     if (phase === "intro") return;
     const handler = (e: DeviceOrientationEvent) => {
@@ -63,11 +119,15 @@ export default function Page() {
       const alpha = 0.3;
       const next = pitchRef.current * (1 - alpha) + e.beta * alpha;
       pitchRef.current = next;
-      setPitch(next);
-      traceRef.current.push({ t: performance.now(), p: next });
-      const cutoff = performance.now() - 30_000;
+      const now = performance.now();
+      traceRef.current.push({ t: now, p: next });
+      const cutoff = now - 30_000;
       while (traceRef.current.length && traceRef.current[0].t < cutoff) {
         traceRef.current.shift();
+      }
+      if (now - lastDisplayUpdateRef.current > 100) {
+        lastDisplayUpdateRef.current = now;
+        setPitch(next);
       }
     };
     window.addEventListener("deviceorientation", handler);
@@ -317,6 +377,8 @@ function Intro({
   );
 }
 
+const SETTLE_SECONDS = 3; // discard first N seconds of baseline samples
+
 function CalibratePhase({
   pitch,
   canvasRef,
@@ -330,7 +392,17 @@ function CalibratePhase({
 }) {
   const [running, setRunning] = useState(false);
   const [secondsLeft, setSecondsLeft] = useState(CALIBRATE_SECONDS);
+  const [warning, setWarning] = useState<string | null>(null);
   const startedAtRef = useRef<number | null>(null);
+  const onDoneRef = useRef(onDone);
+  useEffect(() => {
+    onDoneRef.current = onDone;
+  });
+
+  const stop = useCallback(() => {
+    setRunning(false);
+    setSecondsLeft(CALIBRATE_SECONDS);
+  }, []);
 
   useEffect(() => {
     if (!running) return;
@@ -339,56 +411,113 @@ function CalibratePhase({
         if (s <= 1) {
           clearInterval(id);
           const start = startedAtRef.current ?? performance.now() - CALIBRATE_SECONDS * 1000;
-          const samples = traceRef.current.filter((d) => d.t >= start).map((d) => d.p);
-          if (samples.length < 10) {
+          // Discard the settling window — the patient is often still positioning
+          // the phone in the first few seconds.
+          const settledFrom = start + SETTLE_SECONDS * 1000;
+          const samples = traceRef.current
+            .filter((d) => d.t >= settledFrom)
+            .map((d) => d.p);
+          if (samples.length < 30) {
+            setWarning("Not enough sensor data — make sure motion is enabled and try again.");
+            speak("Not enough data. Let's try again.");
             setRunning(false);
-            speak("We did not capture enough data. Please try again.");
             return CALIBRATE_SECONDS;
           }
           const mean = samples.reduce((a, b) => a + b, 0) / samples.length;
           const min = Math.min(...samples);
           const max = Math.max(...samples);
+          const amplitude = max - min;
+          const usableSec = CALIBRATE_SECONDS - SETTLE_SECONDS;
+          const bpm = estimateBreathRate(samples, usableSec);
+
+          // Sanity gates
+          if (amplitude < 0.5) {
+            setWarning(
+              "Almost no chest movement detected. Make sure the phone is flat on your belly and breathe normally.",
+            );
+            speak("I could not see your breathing. Place the phone on your belly and try again.");
+            setRunning(false);
+            return CALIBRATE_SECONDS;
+          }
+          if (amplitude > 25) {
+            setWarning(
+              "Too much movement — try lying still and breathing normally without talking.",
+            );
+            speak("There was too much movement. Let's try again.");
+            setRunning(false);
+            return CALIBRATE_SECONDS;
+          }
+          if (bpm > 0 && (bpm < 5 || bpm > 30)) {
+            setWarning(
+              `Breath rate looked off (~${bpm.toFixed(0)} per minute). Breathe naturally and try again.`,
+            );
+            speak("Your breathing looked unusual. Let's try once more.");
+            setRunning(false);
+            return CALIBRATE_SECONDS;
+          }
+
+          setWarning(null);
           speak("Baseline captured.");
-          onDone({ meanPitch: mean, amplitudeDeg: max - min });
+          onDoneRef.current({ meanPitch: mean, amplitudeDeg: amplitude });
           return 0;
         }
         return s - 1;
       });
     }, 1000);
     return () => clearInterval(id);
-  }, [running, onDone, traceRef]);
+  }, [running, traceRef]);
 
   return (
     <div className="flex-1 flex flex-col gap-4 w-full">
       <h2 className="text-xl font-semibold">Baseline</h2>
       <p className="text-slate-700">
         Lie flat. Phone screen-up on your belly at the dot. Breathe normally — no holds —
-        for {CALIBRATE_SECONDS} seconds.
+        for {CALIBRATE_SECONDS} seconds. The first {SETTLE_SECONDS}s are ignored while you settle.
       </p>
 
       <Trace canvasRef={canvasRef} pitch={pitch} />
+
+      {warning && (
+        <div className="rounded-xl bg-amber-50 border border-amber-200 p-3 text-sm text-amber-900">
+          {warning}
+        </div>
+      )}
 
       {!running ? (
         <button
           onClick={() => {
             traceRef.current = [];
             startedAtRef.current = performance.now();
+            setSecondsLeft(CALIBRATE_SECONDS);
             setRunning(true);
             speak(`Breathe normally for ${CALIBRATE_SECONDS} seconds.`);
           }}
           className="rounded-xl bg-blue-600 hover:bg-blue-700 text-white font-semibold py-4 text-lg"
         >
-          Start baseline ({CALIBRATE_SECONDS}s)
+          {warning ? `Restart baseline (${CALIBRATE_SECONDS}s)` : `Start baseline (${CALIBRATE_SECONDS}s)`}
         </button>
       ) : (
         <div className="rounded-xl bg-slate-100 py-4 text-center">
           <div className="text-4xl font-mono font-semibold text-slate-800">{secondsLeft}s</div>
-          <div className="text-sm text-slate-500 mt-1">Keep breathing normally…</div>
+          <div className="text-sm text-slate-500 mt-1">
+            {CALIBRATE_SECONDS - secondsLeft < SETTLE_SECONDS
+              ? "Settling… keep still"
+              : "Keep breathing normally…"}
+          </div>
+          <button
+            onClick={stop}
+            className="mt-3 text-xs text-slate-500 underline"
+          >
+            Cancel and restart
+          </button>
         </div>
       )}
     </div>
   );
 }
+
+const PLATEAU_WINDOW_SEC = 4; // look for a stable 4s region inside the hold
+const PLATEAU_SD_LIMIT = 1.5; // if no 4s window has SD < this, the hold is unstable
 
 function LearnPhase({
   pitch,
@@ -408,10 +537,32 @@ function LearnPhase({
   const [holdIdx, setHoldIdx] = useState(0);
   const [stage, setStage] = useState<"idle" | "inhale" | "hold" | "rest">("idle");
   const [holdSecondsLeft, setHoldSecondsLeft] = useState(HOLD_SECONDS);
-  const peaksRef = useRef<number[]>([]);
+  const [lastHoldNote, setLastHoldNote] = useState<string | null>(null);
+  const peaksRef = useRef<number[]>([]); // signed deviation from baseline
   const holdStartRef = useRef<number | null>(null);
+  const onDoneRef = useRef(onDone);
+  useEffect(() => {
+    onDoneRef.current = onDone;
+  });
+
+  const finalize = useCallback(() => {
+    const peaks = peaksRef.current;
+    if (peaks.length === 0) return;
+    const mean = peaks.reduce((a, b) => a + b, 0) / peaks.length;
+    const variance =
+      peaks.reduce((a, b) => a + (b - mean) ** 2, 0) / peaks.length;
+    const sd = Math.sqrt(variance);
+    const tolerance = Math.max(1, sd * 1.5);
+    speak("All five holds learned. Get ready to practice.");
+    onDoneRef.current({
+      targetPitch: baseline.meanPitch + mean,
+      toleranceDeg: tolerance,
+      peaks: peaks.map((p) => baseline.meanPitch + p),
+    });
+  }, [baseline]);
 
   const runHold = useCallback(() => {
+    setLastHoldNote(null);
     setStage("inhale");
     speak("Take a deep breath in.");
     setTimeout(() => {
@@ -426,44 +577,59 @@ function LearnPhase({
         if (s <= 0) {
           clearInterval(tick);
           const start = holdStartRef.current ?? performance.now();
-          const samples = traceRef.current
-            .filter((d) => d.t >= start)
-            .map((d) => d.p - baseline.meanPitch);
-          let peak = 0;
-          if (samples.length) {
-            for (const v of samples) {
-              if (Math.abs(v) > Math.abs(peak)) peak = v;
-            }
+          const data = traceRef.current.filter((d) => d.t >= start);
+
+          let plateauPitch: number;
+          let isStable = false;
+          let note = "";
+          const stable = findStablePlateau(data, PLATEAU_WINDOW_SEC);
+          if (stable && stable.sd <= PLATEAU_SD_LIMIT) {
+            plateauPitch = stable.median;
+            isStable = true;
+            note = `Plateau locked (SD ${stable.sd.toFixed(2)}°)`;
+          } else if (stable) {
+            // Found a window but it was wobbly — still record but flag
+            plateauPitch = stable.median;
+            note = `Hold was a bit wobbly (SD ${stable.sd.toFixed(2)}°). Tap Redo if it didn't feel right.`;
+          } else if (data.length > 0) {
+            plateauPitch =
+              data.reduce((a, b) => a + b.p, 0) / data.length;
+            note = "Short hold — used overall mean. Tap Redo if you want.";
           } else {
-            peak = pitchRef.current - baseline.meanPitch;
+            plateauPitch = pitchRef.current;
+            note = "No samples captured. Please redo.";
           }
-          peaksRef.current.push(peak);
-          speak("And release. Breathe normally.");
+
+          const deviation = plateauPitch - baseline.meanPitch;
+          // Stash provisionally — if the user taps Redo we replace it.
+          peaksRef.current.push(deviation);
+          setLastHoldNote(note);
+          speak(
+            isStable ? "Good hold. Release and breathe." : "Release. Breathe.",
+          );
           setStage("rest");
-          setTimeout(() => {
-            const next = holdIdx + 1;
-            if (next >= LEARN_HOLDS) {
-              const peaks = peaksRef.current;
-              const mean = peaks.reduce((a, b) => a + b, 0) / peaks.length;
-              const variance =
-                peaks.reduce((a, b) => a + (b - mean) ** 2, 0) / peaks.length;
-              const sd = Math.sqrt(variance);
-              const tolerance = Math.max(1, sd * 1.5);
-              speak("All five holds learned. Get ready to practice.");
-              onDone({
-                targetPitch: baseline.meanPitch + mean,
-                toleranceDeg: tolerance,
-                peaks: peaks.map((p) => baseline.meanPitch + p),
-              });
-            } else {
-              setHoldIdx(next);
-              setStage("idle");
-            }
-          }, 3000);
         }
       }, 1000);
     }, 4000);
-  }, [holdIdx, baseline, traceRef, pitchRef, onDone]);
+  }, [baseline, traceRef, pitchRef]);
+
+  const acceptAndContinue = () => {
+    const next = holdIdx + 1;
+    if (next >= LEARN_HOLDS) {
+      finalize();
+    } else {
+      setHoldIdx(next);
+      setStage("idle");
+      setLastHoldNote(null);
+    }
+  };
+
+  const redoHold = () => {
+    // Drop the last recorded peak and rerun the same hold index.
+    peaksRef.current.pop();
+    setStage("idle");
+    setLastHoldNote(null);
+  };
 
   return (
     <div className="flex-1 flex flex-col gap-4 w-full">
@@ -478,6 +644,8 @@ function LearnPhase({
       <div className="rounded-xl bg-slate-100 p-4 text-center">
         <div className="text-sm text-slate-500">
           Hold {Math.min(holdIdx + 1, LEARN_HOLDS)} of {LEARN_HOLDS}
+          {peaksRef.current.length > 0 &&
+            ` · captured ${peaksRef.current.length}`}
         </div>
         {stage === "idle" && (
           <button
@@ -497,7 +665,26 @@ function LearnPhase({
           </div>
         )}
         {stage === "rest" && (
-          <div className="mt-3 text-lg text-slate-700">Release. Breathe.</div>
+          <div className="mt-3 flex flex-col gap-2">
+            <div className="text-lg text-slate-700">Release. Breathe.</div>
+            {lastHoldNote && (
+              <div className="text-xs text-slate-500">{lastHoldNote}</div>
+            )}
+            <div className="grid grid-cols-2 gap-2 mt-2">
+              <button
+                onClick={redoHold}
+                className="rounded-xl bg-slate-200 hover:bg-slate-300 text-slate-800 font-semibold py-2"
+              >
+                Redo
+              </button>
+              <button
+                onClick={acceptAndContinue}
+                className="rounded-xl bg-blue-600 hover:bg-blue-700 text-white font-semibold py-2"
+              >
+                {holdIdx + 1 >= LEARN_HOLDS ? "Finish" : "Next hold"}
+              </button>
+            </div>
+          </div>
         )}
       </div>
     </div>
