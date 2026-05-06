@@ -288,34 +288,42 @@ function Figure() {
   );
 }
 
-type OrbPhase = "rest" | "inhale" | "hold-stable" | "hold-drifting" | "exhale";
+type OrbMood = "calm" | "active" | "drifting";
 
 function Orb({
-  phase,
   size = 220,
+  breathScale,
+  freeze = false,
+  mood = "calm",
   secondsLeft,
   label,
 }: {
-  phase: OrbPhase;
   size?: number;
+  // 0..1 — live pitch-driven breath fullness. If undefined, the orb
+  // gently rests.
+  breathScale?: number;
+  // When true, the orb latches at the most recent breathScale and stops
+  // tracking — the "apex held" feeling.
+  freeze?: boolean;
+  mood?: OrbMood;
   secondsLeft?: number | null;
   label?: string;
 }) {
+  const frozenRef = useRef(0);
+  const live = breathScale ?? 0;
+  if (!freeze) frozenRef.current = live;
+  const breath = freeze ? frozenRef.current : live;
+  // Map 0..1 → 0.55..1.08 (clamp). Below 0.05 we treat as "rest" baseline.
   const scale =
-    phase === "inhale"
-      ? 1.0
-      : phase === "hold-stable"
-      ? 1.02
-      : phase === "hold-drifting"
-      ? 0.92
-      : phase === "exhale"
-      ? 0.65
-      : 0.78;
-  const dur = phase === "inhale" ? "3.5s" : phase === "exhale" ? "4.5s" : "0.8s";
-  const haloColor =
-    phase === "hold-drifting"
-      ? "rgba(217,148,102,0.55)" // amber tint
-      : P.halo;
+    breathScale == null ? 0.78 : 0.55 + Math.min(1, Math.max(0, breath)) * 0.53;
+  // Snappier transition while actively tracking, gentler when frozen / resting.
+  const dur = breathScale == null ? "0.8s" : freeze ? "0.6s" : "0.25s";
+  const haloColor = mood === "drifting" ? "rgba(217,148,102,0.55)" : P.halo;
+  const coreGrad =
+    mood === "drifting"
+      ? `radial-gradient(circle at 35% 30%, #ffffff 0%, ${P.warn} 75%)`
+      : `radial-gradient(circle at 35% 30%, #ffffff 0%, ${P.accent} 75%)`;
+  void mood;
   return (
     <div
       style={{
@@ -355,10 +363,7 @@ function Orb({
           width: "60%",
           height: "60%",
           borderRadius: "50%",
-          background:
-            phase === "hold-drifting"
-              ? `radial-gradient(circle at 35% 30%, #ffffff 0%, ${P.warn} 75%)`
-              : `radial-gradient(circle at 35% 30%, #ffffff 0%, ${P.accent} 75%)`,
+          background: coreGrad,
           transform: `scale(${scale})`,
           transition: `transform ${dur} cubic-bezier(.4,0,.3,1), background 0.6s ease`,
           boxShadow: `0 24px 70px ${haloColor}`,
@@ -1143,8 +1148,13 @@ function Calibration({
         </p>
         <div className="flex-1 flex flex-col items-center justify-center">
           <Orb
-            phase={running ? (pitch > 0 ? "inhale" : "exhale") : "rest"}
             size={200}
+            breathScale={
+              running
+                ? Math.min(1, Math.max(0, (pitch + 5) / 10)) // gentle live tracking
+                : undefined
+            }
+            mood="calm"
           />
           <div
             style={{
@@ -1201,7 +1211,11 @@ function Calibration({
 }
 
 // ─── Session — the heart of the app ─────────────────────────────────────────
-type SessionStage = "idle" | "inhale" | "hold" | "exhale" | "between";
+type SessionStage = "idle" | "active" | "exhale" | "between";
+
+const POST_TARGET_AUTOEND_MS = 5000; // auto-end this long after target is reached
+const RELEASE_PEAK_FRAC = 0.3; // dev < frac * peak (and sustained) = release
+const RELEASE_SUSTAIN_MS = 1500;
 
 function Session({
   baseline,
@@ -1232,6 +1246,8 @@ function Session({
   const [longestRunSec, setLongestRunSec] = useState(0);
   const [isStable, setIsStable] = useState(false);
   const [reachedTargetThisHold, setReachedTargetThisHold] = useState(false);
+  // Live 0..1 mapping of pitch deviation → orb size during an active hold.
+  const [breathScale, setBreathScale] = useState(0);
 
   const holdsRef = useRef<Hold[]>([]);
   const holdStartRef = useRef<number | null>(null);
@@ -1244,8 +1260,8 @@ function Session({
     buzzRef.current = buzz;
   });
 
-  // Per-hold runtime accumulators (refs so the polling loop can mutate without
-  // re-running effects).
+  // Per-hold runtime accumulators.
+  const peakDevRef = useRef(0);
   const stableMsAccumRef = useRef(0);
   const currentRunStartRef = useRef<number | null>(null);
   const longestRunMsRef = useRef(0);
@@ -1254,10 +1270,11 @@ function Session({
   const candidateStateRef = useRef<{ wantStable: boolean; since: number }>({ wantStable: false, since: 0 });
   const lastSampleAtRef = useRef<number>(0);
   const targetCueFiredRef = useRef(false);
+  const targetReachedAtRef = useRef<number | null>(null);
   const releaseCandidateSinceRef = useRef<number | null>(null);
 
-  // Reset state when starting a hold
   const resetHoldState = useCallback(() => {
+    peakDevRef.current = 0;
     stableMsAccumRef.current = 0;
     currentRunStartRef.current = null;
     longestRunMsRef.current = 0;
@@ -1265,102 +1282,98 @@ function Session({
     firstLockAtRef.current = null;
     candidateStateRef.current = { wantStable: false, since: 0 };
     targetCueFiredRef.current = false;
+    targetReachedAtRef.current = null;
     releaseCandidateSinceRef.current = null;
     setStableSec(0);
     setLongestRunSec(0);
     setIsStable(false);
     setReachedTargetThisHold(false);
+    setBreathScale(0);
   }, []);
 
-  const finishHold = useCallback(
-    (auto: boolean) => {
-      const start = holdStartRef.current ?? performance.now();
-      const totalMs = performance.now() - start;
-      const totalDuration = totalMs / 1000;
-      // Plateau summary from the longest stable run, if any
-      let plateauPitch: number | null = null;
-      let plateauSD: number | null = null;
-      if (longestRunMsRef.current > 1500) {
-        // Approx end of longest run = end of accumulation; we don't track its
-        // boundaries precisely, so use last 3s of the hold trace as a proxy.
-        const summary = summarizeRange(
-          traceRef.current,
-          start + Math.max(0, totalMs - 3000),
-          start + totalMs,
-        );
-        if (summary) {
-          plateauPitch = summary.median;
-          plateauSD = summary.sd;
-        }
+  const finishHold = useCallback(() => {
+    const start = holdStartRef.current ?? performance.now();
+    const totalMs = performance.now() - start;
+    let plateauPitch: number | null = null;
+    let plateauSD: number | null = null;
+    if (longestRunMsRef.current > 1500) {
+      const summary = summarizeRange(
+        traceRef.current,
+        start + Math.max(0, totalMs - 3000),
+        start + totalMs,
+      );
+      if (summary) {
+        plateauPitch = summary.median;
+        plateauSD = summary.sd;
       }
-      const h: Hold = {
-        index: holdIdx + 1,
-        totalDurationSec: totalDuration,
-        stableSec: stableMsAccumRef.current / 1000,
-        longestRunSec: longestRunMsRef.current / 1000,
-        driftEvents: driftEventsRef.current,
-        timeToLockSec:
-          firstLockAtRef.current != null ? (firstLockAtRef.current - start) / 1000 : null,
-        plateauPitch,
-        plateauSD,
-        reachedTarget: longestRunMsRef.current / 1000 >= holdTarget,
-      };
-      holdsRef.current.push(h);
-      cueRef.current("release_breath");
-      buzzRef.current(40);
-      setStage("exhale");
-      setTimeout(() => setStage("between"), 1500);
-      setTimeout(() => {
-        const next = holdIdx + 1;
-        if (next >= holdsPerSession) {
-          cueRef.current("session_done");
-          onComplete(holdsRef.current);
-        } else {
-          setHoldIdx(next);
-          resetHoldState();
-          setStage("idle");
-        }
-      }, 4500);
-      void auto; // currently unused but kept for clarity
-    },
-    [holdIdx, holdTarget, holdsPerSession, onComplete, resetHoldState, traceRef],
-  );
+    }
+    const h: Hold = {
+      index: holdIdx + 1,
+      totalDurationSec: totalMs / 1000,
+      stableSec: stableMsAccumRef.current / 1000,
+      longestRunSec: longestRunMsRef.current / 1000,
+      driftEvents: driftEventsRef.current,
+      timeToLockSec:
+        firstLockAtRef.current != null ? (firstLockAtRef.current - start) / 1000 : null,
+      plateauPitch,
+      plateauSD,
+      reachedTarget: longestRunMsRef.current / 1000 >= holdTarget,
+    };
+    holdsRef.current.push(h);
+    cueRef.current("release_breath");
+    buzzRef.current(40);
+    setStage("exhale");
+    setTimeout(() => setStage("between"), 1500);
+    setTimeout(() => {
+      const next = holdIdx + 1;
+      if (next >= holdsPerSession) {
+        cueRef.current("session_done");
+        onComplete(holdsRef.current);
+      } else {
+        setHoldIdx(next);
+        resetHoldState();
+        setStage("idle");
+      }
+    }, 4500);
+  }, [holdIdx, holdTarget, holdsPerSession, onComplete, resetHoldState, traceRef]);
 
-  // Stability detection loop during the hold
+  // Stability + breath-scale loop during the hold
   useEffect(() => {
-    if (stage !== "hold") return;
+    if (stage !== "active") return;
     const id = setInterval(() => {
       const now = performance.now();
       const dt = lastSampleAtRef.current ? now - lastSampleAtRef.current : 0;
       lastSampleAtRef.current = now;
 
-      const sd = rollingSD(traceRef.current, STABILITY_WINDOW_MS);
-      const wantStable = sd < STABLE_SD_DEG;
+      const dev = pitchRef.current - baseline.meanPitch;
+      const absDev = Math.abs(dev);
+      peakDevRef.current = Math.max(peakDevRef.current, absDev);
 
-      // Debounced state machine
+      // Live breath scale 0..1 — relative to running peak (or a sensible
+      // floor of 8° so the orb starts proportional, not maxed out).
+      const ref = Math.max(8, peakDevRef.current);
+      setBreathScale(Math.min(1, absDev / ref));
+
+      // Stability detection
+      const sd = rollingSD(traceRef.current, STABILITY_WINDOW_MS);
+      const wantStable = sd < STABLE_SD_DEG && absDev > 2; // require some inhale
       const cs = candidateStateRef.current;
       if (wantStable !== cs.wantStable) {
         candidateStateRef.current = { wantStable, since: now };
       }
       const heldFor = now - candidateStateRef.current.since;
       const debounceMs = wantStable ? STABLE_DEBOUNCE_MS : DRIFT_DEBOUNCE_MS;
-      const confirm = heldFor >= debounceMs;
-
-      if (confirm) {
+      if (heldFor >= debounceMs) {
         if (wantStable && !isStable) {
           setIsStable(true);
           if (firstLockAtRef.current == null) firstLockAtRef.current = now;
           currentRunStartRef.current = now;
-          if (driftEventsRef.current === 0) {
-            cueRef.current("locked_in");
-          } else {
-            cueRef.current("regained");
-          }
+          if (driftEventsRef.current === 0) cueRef.current("locked_in");
+          else cueRef.current("regained");
           buzzRef.current(50);
         } else if (!wantStable && isStable) {
           setIsStable(false);
           driftEventsRef.current += 1;
-          // close out the run that just ended
           if (currentRunStartRef.current != null) {
             const runMs = now - currentRunStartRef.current;
             if (runMs > longestRunMsRef.current) {
@@ -1384,56 +1397,57 @@ function Session({
             setLongestRunSec(runMs / 1000);
           }
         }
-        // Target reached?
         if (
           !targetCueFiredRef.current &&
           longestRunMsRef.current / 1000 >= holdTarget
         ) {
           targetCueFiredRef.current = true;
+          targetReachedAtRef.current = now;
           setReachedTargetThisHold(true);
           cueRef.current("target_reached");
           buzzRef.current([100, 50, 100, 50, 250]);
         }
       }
 
-      // Release auto-detection: pitch returned near baseline for >RELEASE_TIME_MS
-      const dev = Math.abs(pitchRef.current - baseline.meanPitch);
-      const peakDev = Math.max(1, baseline.amplitudeDeg * 2);
-      if (dev < peakDev * RELEASE_PITCH_FRAC) {
+      // Auto-release path 1: pitch dropped to <30% of peak hold deviation
+      // for >1.5s. Only meaningful once we've actually peaked.
+      if (peakDevRef.current > 4 && absDev < peakDevRef.current * RELEASE_PEAK_FRAC) {
         if (releaseCandidateSinceRef.current == null) {
           releaseCandidateSinceRef.current = now;
-        } else if (now - releaseCandidateSinceRef.current > RELEASE_TIME_MS) {
-          finishHold(true);
+        } else if (now - releaseCandidateSinceRef.current > RELEASE_SUSTAIN_MS) {
+          finishHold();
+          return;
         }
       } else {
         releaseCandidateSinceRef.current = null;
       }
-    }, 200);
+
+      // Auto-release path 2: target reached, then 5s additional grace —
+      // celebrate the win and end. Prevents "stuck on stable forever."
+      if (
+        targetReachedAtRef.current != null &&
+        now - targetReachedAtRef.current > POST_TARGET_AUTOEND_MS
+      ) {
+        finishHold();
+        return;
+      }
+    }, 100);
     return () => clearInterval(id);
   }, [stage, baseline, holdTarget, isStable, pitchRef, traceRef, finishHold]);
 
   const startHold = () => {
     resetHoldState();
-    setStage("inhale");
+    setStage("active");
     cueRef.current("inhale_cue");
-    setTimeout(() => {
-      setStage("hold");
-      holdStartRef.current = performance.now();
-      lastSampleAtRef.current = performance.now();
-    }, 4000);
+    holdStartRef.current = performance.now();
+    lastSampleAtRef.current = performance.now();
   };
 
-  // Visual orb phase
-  const orbPhase: OrbPhase =
-    stage === "inhale"
-      ? "inhale"
-      : stage === "hold"
-      ? isStable
-        ? "hold-stable"
-        : "hold-drifting"
-      : stage === "exhale"
-      ? "exhale"
-      : "rest";
+  const orbMood: OrbMood =
+    stage === "active" ? (isStable ? "calm" : "active") : "calm";
+  // While drifting in active mode, color = drifting (warning amber)
+  const orbDrifting =
+    stage === "active" && !isStable && firstLockAtRef.current != null;
 
   const targetPct = Math.min(100, (longestRunSec / holdTarget) * 100);
   const stablePct = Math.min(100, (stableSec / holdTarget) * 100);
@@ -1451,10 +1465,10 @@ function Session({
           height: 480,
           borderRadius: "50%",
           background: `radial-gradient(circle, ${
-            stage === "hold" && !isStable ? "rgba(217,148,102,0.4)" : P.halo
+            orbDrifting ? "rgba(217,148,102,0.4)" : P.halo
           } 0%, transparent 60%)`,
           filter: "blur(8px)",
-          opacity: stage === "hold" ? 1 : 0.6,
+          opacity: stage === "active" ? 1 : 0.6,
           transition: "opacity 1s ease, background 0.6s ease",
           pointerEvents: "none",
         }}
@@ -1529,14 +1543,16 @@ function Session({
             />
           </svg>
           <Orb
-            phase={orbPhase}
             size={220}
+            breathScale={stage === "active" ? breathScale : undefined}
+            freeze={stage === "active" && isStable}
+            mood={orbDrifting ? "drifting" : orbMood}
             secondsLeft={
-              stage === "hold"
+              stage === "active" && isStable
                 ? Math.max(0, Math.ceil(holdTarget - longestRunSec))
                 : null
             }
-            label={stage === "hold" ? "to target" : undefined}
+            label={stage === "active" && isStable ? "to target" : undefined}
           />
         </div>
         <div className="mt-8 text-center">
@@ -1551,10 +1567,10 @@ function Session({
           >
             {stage === "idle"
               ? "Ready"
-              : stage === "inhale"
-              ? "Breathe in"
-              : stage === "hold"
-              ? isStable
+              : stage === "active"
+              ? !firstLockAtRef.current
+                ? "Breathe in deeply"
+                : isStable
                 ? reachedTargetThisHold
                   ? "Target reached"
                   : "Locked in"
@@ -1574,10 +1590,10 @@ function Session({
           >
             {stage === "idle"
               ? "Hold " + (holdIdx + 1)
-              : stage === "inhale"
-              ? "Deep breath in"
-              : stage === "hold"
-              ? isStable
+              : stage === "active"
+              ? !firstLockAtRef.current
+                ? "Inhale fully"
+                : isStable
                 ? "Hold steady"
                 : "Steady…"
               : stage === "exhale"
@@ -1637,14 +1653,14 @@ function Session({
           </div>
           <div className="mt-3">
             {stage === "idle" && <Btn onClick={startHold}>Start hold {holdIdx + 1}</Btn>}
-            {stage === "hold" && (
-              <Btn variant="ghost" onClick={() => finishHold(false)}>
+            {stage === "active" && (
+              <Btn variant="ghost" onClick={finishHold}>
                 End hold
               </Btn>
             )}
-            {(stage === "inhale" || stage === "exhale" || stage === "between") && (
+            {(stage === "exhale" || stage === "between") && (
               <Btn variant="ghost" disabled>
-                {stage === "inhale" ? "Breathe in…" : stage === "exhale" ? "Releasing…" : "Resting…"}
+                {stage === "exhale" ? "Releasing…" : "Resting…"}
               </Btn>
             )}
           </div>
