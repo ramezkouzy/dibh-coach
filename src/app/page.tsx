@@ -42,10 +42,13 @@ type Hold = {
 // ─── Tunables ───────────────────────────────────────────────────────────────
 const STABILITY_WINDOW_MS = 2000; // SD over the last N ms = stability check
 // Adaptive stability threshold: baseline breathing SD × this fraction.
-// Real recording showed normal breathing SD ≈ 0.3°, hold SD ≈ 0.15°. Anything
-// under ~half the baseline SD is reliably "held still". Clamped to a sane
-// floor/ceiling.
-const STABLE_SD_FRAC_OF_BASELINE = 0.5;
+// Two real recordings showed: belly-mode baseline SD ≈ 0.8°, hold SD ≈ 0.07°
+// (11× ratio); chest-mode baseline SD ≈ 1.0°, hold SD ≈ 0.50° (2× ratio).
+// The 0.7 multiplier comfortably accommodates both:
+//   belly threshold = 0.56° → hold (0.07°) sits 8× below
+//   chest threshold = 0.69° → hold (0.50°) sits 1.4× below (acceptable)
+// Lower multipliers (0.5) flickered for chest-mode holders.
+const STABLE_SD_FRAC_OF_BASELINE = 0.7;
 const STABLE_SD_FLOOR = 0.08;
 const STABLE_SD_CEILING = 1.2;
 const STABLE_DEBOUNCE_MS = 1000; // must hold stability for this long before "lock" event
