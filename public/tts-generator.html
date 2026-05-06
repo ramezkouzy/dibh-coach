@@ -1,0 +1,316 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>DIBH Coach — TTS Generator</title>
+    <script src="https://js.puter.com/v2/"></script>
+    <style>
+      * { box-sizing: border-box; }
+      body {
+        font-family: -apple-system, BlinkMacSystemFont, sans-serif;
+        max-width: 720px;
+        margin: 2rem auto;
+        padding: 1rem;
+        color: #1e293b;
+        background: #f8fafc;
+      }
+      h1 { font-size: 1.5rem; }
+      .card {
+        background: white;
+        border: 1px solid #e2e8f0;
+        border-radius: 12px;
+        padding: 1.25rem;
+        margin: 1rem 0;
+      }
+      label { display: block; font-size: 0.85rem; color: #475569; margin-top: 0.6rem; }
+      select, input, button {
+        font: inherit;
+        padding: 0.6rem 0.8rem;
+        border-radius: 8px;
+        border: 1px solid #cbd5e1;
+        background: white;
+      }
+      button {
+        background: #2563eb;
+        color: white;
+        border: none;
+        font-weight: 600;
+        cursor: pointer;
+      }
+      button:hover { background: #1d4ed8; }
+      button:disabled { background: #94a3b8; cursor: not-allowed; }
+      button.secondary { background: #e2e8f0; color: #1e293b; }
+      button.secondary:hover { background: #cbd5e1; }
+      .row { display: flex; gap: 0.5rem; align-items: center; flex-wrap: wrap; }
+      ul.log { list-style: none; padding: 0; margin: 0.5rem 0 0; font-family: ui-monospace, monospace; font-size: 0.85rem; }
+      ul.log li { padding: 0.25rem 0; border-bottom: 1px solid #f1f5f9; display: flex; justify-content: space-between; }
+      .ok { color: #16a34a; }
+      .err { color: #dc2626; }
+      .dim { color: #64748b; }
+      .pill { font-size: 0.75rem; padding: 2px 8px; border-radius: 999px; background: #e2e8f0; }
+      code { background: #f1f5f9; padding: 1px 6px; border-radius: 4px; font-size: 0.85em; }
+    </style>
+  </head>
+  <body>
+    <h1>DIBH Coach — TTS Generator</h1>
+    <p class="dim">
+      One-shot generator for the 18 coaching clips. Sign in to Puter (free), pick a voice,
+      pick the <code>public/audio/</code> folder, click Generate. Files land directly in place.
+    </p>
+
+    <div class="card">
+      <div class="row">
+        <button id="signin">Sign in to Puter</button>
+        <span id="who" class="dim">not signed in</span>
+      </div>
+
+      <label for="voice">Voice</label>
+      <select id="voice">
+        <option value="21m00Tcm4TlvDq8ikWAM" selected>Rachel — calm female narrator (default)</option>
+        <option value="EXAVITQu4vr4xnSDxMaL">Bella — soft, young female</option>
+        <option value="XB0fDUnXU5powFXDhCwa">Charlotte — calm British female</option>
+        <option value="piTKgcLEGmPE4e6mEKli">Nicole — whisper, intimate</option>
+        <option value="oWAxZoHRcTscEMVuZJqA">Glinda — warm, gentle</option>
+        <option value="custom">Custom voice ID…</option>
+      </select>
+      <input id="customVoice" placeholder="paste voice ID" style="display:none; width:100%; margin-top:6px;" />
+
+      <label for="model">Model</label>
+      <select id="model">
+        <option value="eleven_multilingual_v2" selected>multilingual_v2 (best quality)</option>
+        <option value="eleven_turbo_v2_5">turbo_v2_5 (faster, cheaper)</option>
+        <option value="eleven_flash_v2_5">flash_v2_5 (fastest)</option>
+      </select>
+
+      <label for="testText">Preview a phrase before generating</label>
+      <div class="row">
+        <select id="testText" style="flex:1; min-width: 240px;"></select>
+        <button class="secondary" id="preview" disabled>Preview</button>
+      </div>
+    </div>
+
+    <div class="card">
+      <div class="row">
+        <button id="pickFolder">Pick output folder</button>
+        <span id="folderName" class="dim">no folder picked</span>
+      </div>
+      <div class="row" style="margin-top:0.75rem;">
+        <button id="generate" disabled>Generate all 18 clips</button>
+        <button class="secondary" id="downloadAll" style="display:none;">Download as fallback (Safari)</button>
+      </div>
+      <ul class="log" id="log"></ul>
+    </div>
+
+    <p class="dim" style="font-size:0.85rem;">
+      Tip: in Chrome/Edge use <em>Pick folder</em> → navigate to the repo's
+      <code>public/audio/</code>. The browser will prompt to allow writes; accept.
+      In Safari, the folder picker isn't available — use <em>Download as fallback</em> and
+      drag the 18 files into the folder yourself.
+    </p>
+
+    <script>
+      const PHRASES = {
+        baseline_intro: "Breathe normally for twenty seconds.",
+        baseline_low_data: "Not enough data. Let's try again.",
+        baseline_no_breath: "I could not see your breathing. Place the phone on your belly and try again.",
+        baseline_too_much: "There was too much movement. Let's try again.",
+        baseline_odd_rate: "Your breathing looked unusual. Let's try once more.",
+        baseline_done: "Baseline captured.",
+        learn_inhale: "Take a deep breath in.",
+        learn_hold: "Hold it.",
+        learn_release_good: "Good hold. Release and breathe.",
+        learn_release: "Release. Breathe.",
+        learn_complete: "All five holds learned. Get ready to practice.",
+        practice_inhale: "Take a deep breath in, then ease down into the green zone.",
+        practice_hold: "Hold it.",
+        practice_in_zone: "Hold. Steady.",
+        practice_below: "Breathe in a little more, then hold.",
+        practice_above: "Ease down to the green zone.",
+        practice_drift: "Release and try again.",
+        practice_release: "Release. Breathe out.",
+        practice_done: "Session complete. Great work.",
+      };
+
+      const $ = (id) => document.getElementById(id);
+      const log = $("log");
+      const testTextSel = $("testText");
+      for (const [k, t] of Object.entries(PHRASES)) {
+        const o = document.createElement("option");
+        o.value = k;
+        o.textContent = `${k} — “${t}”`;
+        testTextSel.appendChild(o);
+      }
+
+      let folderHandle = null;
+      let signedIn = false;
+
+      function chosenVoice() {
+        const v = $("voice").value;
+        if (v === "custom") return $("customVoice").value.trim();
+        return v;
+      }
+      function chosenModel() { return $("model").value; }
+
+      function refreshButtons() {
+        $("preview").disabled = !signedIn;
+        $("generate").disabled = !signedIn || !folderHandle;
+      }
+
+      $("voice").addEventListener("change", () => {
+        $("customVoice").style.display = $("voice").value === "custom" ? "block" : "none";
+      });
+
+      $("signin").addEventListener("click", async () => {
+        try {
+          const user = await puter.auth.signIn();
+          signedIn = true;
+          $("who").textContent = `signed in as ${user.username}`;
+          $("who").classList.remove("dim");
+          $("who").classList.add("ok");
+          refreshButtons();
+        } catch (e) {
+          $("who").textContent = `sign-in failed: ${e.message || e}`;
+          $("who").classList.add("err");
+        }
+      });
+
+      // Detect already-signed-in
+      (async () => {
+        try {
+          if (await puter.auth.isSignedIn()) {
+            const user = await puter.auth.getUser();
+            signedIn = true;
+            $("who").textContent = `signed in as ${user.username}`;
+            $("who").classList.remove("dim");
+            $("who").classList.add("ok");
+            refreshButtons();
+          }
+        } catch {}
+      })();
+
+      $("pickFolder").addEventListener("click", async () => {
+        if (!window.showDirectoryPicker) {
+          alert("Folder picker not supported in this browser. Use Chrome or Edge, or use the Download fallback.");
+          $("downloadAll").style.display = "inline-block";
+          return;
+        }
+        try {
+          folderHandle = await window.showDirectoryPicker({ mode: "readwrite" });
+          $("folderName").textContent = folderHandle.name + "/";
+          $("folderName").classList.remove("dim");
+          $("folderName").classList.add("ok");
+          refreshButtons();
+        } catch (e) {
+          if (e.name !== "AbortError") {
+            $("folderName").textContent = `pick failed: ${e.message || e}`;
+            $("folderName").classList.add("err");
+          }
+        }
+      });
+
+      async function audioToBlob(audioOrUrl) {
+        // puter.ai.txt2speech returns an HTMLAudioElement. Fetch its src to get bytes.
+        const url = typeof audioOrUrl === "string" ? audioOrUrl : audioOrUrl.src;
+        if (!url) throw new Error("no audio src");
+        const r = await fetch(url);
+        if (!r.ok) throw new Error(`fetch ${r.status}`);
+        return await r.blob();
+      }
+
+      async function generateOne(key, text) {
+        const audio = await puter.ai.txt2speech(text, {
+          provider: "elevenlabs",
+          voice: chosenVoice(),
+          model: chosenModel(),
+        });
+        return await audioToBlob(audio);
+      }
+
+      $("preview").addEventListener("click", async () => {
+        const key = testTextSel.value;
+        const text = PHRASES[key];
+        $("preview").disabled = true;
+        try {
+          const audio = await puter.ai.txt2speech(text, {
+            provider: "elevenlabs",
+            voice: chosenVoice(),
+            model: chosenModel(),
+          });
+          audio.play();
+        } catch (e) {
+          alert(`Preview failed: ${e.message || e}`);
+        } finally {
+          $("preview").disabled = false;
+        }
+      });
+
+      function logRow(key, status, detail = "") {
+        const li = document.createElement("li");
+        const left = document.createElement("span");
+        left.textContent = `${key}.mp3`;
+        const right = document.createElement("span");
+        right.className = status === "ok" ? "ok" : status === "err" ? "err" : "dim";
+        right.textContent = detail;
+        li.appendChild(left);
+        li.appendChild(right);
+        log.appendChild(li);
+        return right;
+      }
+
+      $("generate").addEventListener("click", async () => {
+        log.innerHTML = "";
+        $("generate").disabled = true;
+        const entries = Object.entries(PHRASES);
+        let ok = 0, fail = 0;
+        for (const [key, text] of entries) {
+          const status = logRow(key, "pending", "generating…");
+          try {
+            const blob = await generateOne(key, text);
+            // Write directly to the picked folder
+            const fileHandle = await folderHandle.getFileHandle(`${key}.mp3`, { create: true });
+            const writable = await fileHandle.createWritable();
+            await writable.write(blob);
+            await writable.close();
+            status.className = "ok";
+            status.textContent = `${(blob.size / 1024).toFixed(1)} KB ✓`;
+            ok++;
+          } catch (e) {
+            status.className = "err";
+            status.textContent = `failed: ${e.message || e}`;
+            fail++;
+          }
+        }
+        const summary = document.createElement("li");
+        summary.style.fontWeight = "600";
+        summary.textContent = `Done — ${ok} ok, ${fail} failed.`;
+        summary.className = fail === 0 ? "ok" : "err";
+        log.appendChild(summary);
+        $("generate").disabled = false;
+      });
+
+      $("downloadAll").addEventListener("click", async () => {
+        log.innerHTML = "";
+        $("downloadAll").disabled = true;
+        for (const [key, text] of Object.entries(PHRASES)) {
+          const status = logRow(key, "pending", "generating…");
+          try {
+            const blob = await generateOne(key, text);
+            const a = document.createElement("a");
+            a.href = URL.createObjectURL(blob);
+            a.download = `${key}.mp3`;
+            document.body.appendChild(a);
+            a.click();
+            a.remove();
+            status.className = "ok";
+            status.textContent = `${(blob.size / 1024).toFixed(1)} KB ↓`;
+          } catch (e) {
+            status.className = "err";
+            status.textContent = `failed: ${e.message || e}`;
+          }
+        }
+        $("downloadAll").disabled = false;
+      });
+    </script>
+  </body>
+</html>
