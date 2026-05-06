@@ -1,0 +1,423 @@
+% A Research Letter draft for Advances in Radiation Oncology, modeled on
+% Capaldi et al. 2026 (https://doi.org/10.1016/j.adro.2025.101970).
+%
+% Build with:  pdflatex main && bibtex main && pdflatex main && pdflatex main
+%
+% Author order is a placeholder.  The clinical leadership question is open;
+% see TODO.md.
+
+\documentclass[3p,times]{elsarticle}
+
+\usepackage{graphicx}
+\usepackage{amsmath}
+\usepackage{amssymb}
+\usepackage{booktabs}
+\usepackage{url}
+\usepackage{hyperref}
+\hypersetup{colorlinks=true,linkcolor=blue,citecolor=blue,urlcolor=blue}
+
+\journal{Advances in Radiation Oncology}
+
+\begin{document}
+
+\begin{frontmatter}
+
+\title{Tide: A Browser-Based At-Home Coaching System for Deep-Inspiration
+Breath-Hold Reproducibility in Left-Sided Breast Radiation Therapy}
+
+\author[mdacc]{Ramez Kouzy}
+\ead{rkouzy@mdanderson.org}
+
+\author[mdacc]{Melissa P.~Mitchell}
+\author[breath]{Belisa Vranich}
+\author[mdacc]{(other co-authors TBD)}
+
+\address[mdacc]{Department of Radiation Oncology, The University of Texas
+MD Anderson Cancer Center, Houston, Texas, USA}
+\address[breath]{The Breathing Class, New York, NY, USA}
+
+\cortext[cor1]{Corresponding author.}
+
+\begin{abstract}
+\textbf{Purpose.} Deep-inspiration breath-hold (DIBH) reduces cardiac
+dose during left-sided breast radiation therapy, but its dosimetric
+benefit depends on the patient's ability to reproduce a consistent
+chest-hold position across fractions. Surface-guided radiation therapy
+(SGRT) handles this in the treatment vault; no comparable feedback is
+available at home, where between-sim and between-fraction practice
+could plausibly improve preparedness and on-couch reproducibility. We
+describe \emph{Tide}, a browser-based smartphone application that uses
+the phone's fused-attitude orientation sensor to coach DIBH
+reproducibility at home, with adaptive per-session calibration and
+position-match audio feedback.
+
+\textbf{Methods and Materials.} Tide was implemented as a static
+single-page application (Next.js 16, React 19) deployed on Vercel,
+delivering identical behaviour on iOS Safari and Android Chrome via
+\texttt{DeviceOrientationEvent}. The patient places the phone in
+portrait with the charging-port edge resting on the sternum, allowing
+the phone to act as a lever during chest expansion. A guided
+four-step session (Calibration $\rightarrow$ Learn $\rightarrow$
+Practice $\rightarrow$ Report) measures (i) the patient's
+breathing-pitch standard deviation over 12\,s of normal breathing,
+(ii) a target plateau pitch from the average of three ``comfortable''
+calibration holds, and (iii) the reproducibility and on-target time
+of five subsequent practice holds. In-hold stability is detected
+adaptively via a 2-second rolling SD threshold set to
+$0.7\times$ baseline breathing SD, with a hysteretic state machine
+(1.0\,s lock debounce, 1.5\,s drift debounce). Coaching audio is
+delivered as pre-rendered MP3 clips (ElevenLabs, ``Rachel'' voice)
+through a single \texttt{<audio>} element; the Web Speech API is the
+silent fallback if a clip is missing. Haptic confirmation uses the
+Web Vibration API where supported (Android only).
+
+\textbf{Results.} Two illustrative recordings (single subject, Apple
+iPhone, iOS Safari) demonstrate the design. With the phone laid flat
+and centered on the abdomen (belly-only breathing), normal-breathing
+pitch SD was 0.81$^{\circ}$ and in-hold pitch SD 0.07$^{\circ}$ (11$\times$
+ratio); peak inhale pitch deviation was small (5$^{\circ}$). With the
+phone bridging from sternum to upper belly (chest-led DIBH-style
+breathing), normal-breathing SD was 0.99$^{\circ}$ and in-hold SD
+0.13$^{\circ}$ (6$\times$ ratio); peak inhale pitch deviation rose to
+14$^{\circ}$. The sternum-bridging placement therefore yielded
+substantially larger absolute signal at modest cost in in-hold
+quietness. The adaptive threshold cleanly separated breathing from
+holds in both modes.
+
+\textbf{Conclusions.} A consumer smartphone, delivered through a
+browser without any add-on hardware, can capture sufficient signal
+for at-home DIBH reproducibility coaching. Tide complements rather
+than replaces in-clinic SGRT systems by addressing the between-fraction
+practice gap. Forthcoming work will validate Tide in a single-arm
+feasibility cohort against simulator-day plateau reproducibility.
+\end{abstract}
+
+\begin{keyword}
+deep-inspiration breath-hold \sep DIBH \sep mobile health \sep
+breast radiation therapy \sep cardiac sparing \sep
+patient-reported outcomes \sep smartphone sensors
+\end{keyword}
+
+\end{frontmatter}
+
+\section{Introduction}
+
+DIBH is now a standard-of-care technique for left-sided breast
+radiation therapy because it reduces mean heart dose by displacing
+the heart away from the chest wall during chest
+expansion~\cite{darby2013ischemic,piroth2019heart}. Its dosimetric
+benefit, however, depends on the patient reproducing the same chest
+position across each treatment fraction; small departures from the
+planning position translate directly to dose-distribution
+errors~\cite{tang2015dosimetric}. SGRT systems handle this within
+the treatment vault, providing real-time positional feedback and
+beam-hold gating with sub-millimetre accuracy. Recent work has
+demonstrated that a smartphone's onboard sensors are themselves
+sufficient to act as an SGRT-equivalent in-room monitor: Capaldi et
+al.\ first validated an iOS accelerometer/gyroscope-based monitor
+(``IRF'') against the commercial Real-time Position Management
+(RPM) system in 2020~\cite{capaldi2020}, and extended this in 2026
+with a LiDAR-based six-degree-of-freedom system (``iSGRT'')
+validated against in-vault clinical SGRT~\cite{capaldi2026}.
+
+A separate body of work has examined the role of patient
+\emph{preparation} for DIBH in the days before simulation and
+treatment. Educational mobile interventions reduce
+sim-day anxiety and self-reported preparedness without
+quantitatively coaching the breath-hold itself~\cite{mitchell2025prep,
+dibhapp}. Spirometry-based at-home preparation devices have been
+piloted, but their adoption is limited by the cost and complexity
+of dedicated hardware~\cite{delombaerde2021spirometer}.
+
+The gap between these two literatures is the
+\emph{between-fraction at-home practice} of the breath-hold itself
+with quantitative feedback that does not require the patient to
+visit the treatment vault. Mitchell et al.\ articulated this gap
+directly in early 2026, asking whether a phone laid on the abdomen
+during DIBH could (a) measure the depth of inhale, and (b) coach
+the patient back to the same plateau position in subsequent
+attempts. Tide is our response. It uses the same fused-attitude
+sensor surface that Capaldi's IRF validated, but is positioned for
+home use, framed as a wellness/practice tool rather than a clinical
+motion monitor, and explicitly optimised for
+\emph{reproducibility} of the chest-hold position rather than
+absolute positional accuracy.
+
+\section{Methods and Materials}
+
+\subsection{Application architecture}
+
+Tide is a single-page client-side application built with Next.js
+16.2 (Turbopack) and React 19, deployed as static assets to
+Vercel's CDN. There is no backend; all sensor processing, state
+machine, and audio playback run in the browser. Sensor input is
+read through \texttt{DeviceOrientationEvent} (fused pitch / roll /
+yaw) and \texttt{DeviceMotionEvent} (raw acceleration, acceleration
+including gravity, and rotation rate). A \texttt{WakeLock} request
+is issued on entry to the active phases to prevent the screen from
+sleeping during recording.
+
+\subsection{Phone placement and signal model}
+
+The patient lies supine and places the phone in portrait
+orientation with the charging-port edge anchored on the sternum,
+the rest of the phone extending caudally across the upper abdomen.
+This placement makes the phone act as a lever across the
+chest-belly seam: chest expansion lifts the cranial end of the
+phone while the caudal end (resting on more compliant abdominal
+tissue) lags, producing rotation around the medio-lateral axis.
+The fused-attitude beta angle reads this rotation directly. A
+flat, centered phone produces only translation (both ends rise
+together) and no usable rotational signal, as confirmed in our
+preliminary recordings (Section~\ref{sec:results}).
+
+\subsection{Four-phase session}
+
+Each session walks the patient through:
+
+\paragraph{Phase 1 --- Calibration (12\,s).}
+Twelve seconds of normal breathing, with the first two seconds
+discarded as a settling window. The remaining ten seconds yield
+the patient's breathing-pitch standard deviation
+(\texttt{breathingSD}), mean baseline pitch, and an estimated
+breathing rate from zero-crossings of the centered signal. Sanity
+gates reject calibrations with implausible amplitude
+($<\!0.4^{\circ}$ or $>\!30^{\circ}$) or breath rate (outside
+4--30 breaths per minute), prompting the patient to retry.
+
+\paragraph{Phase 2 --- Learn (3 comfortable holds).}
+The patient performs three ``comfortable'' chest holds, each at a
+depth they can reproduce. A hold is delineated by a Start tap; the
+algorithm watches stability passively. Each hold's plateau is
+defined as the median pitch over the last 3 seconds of its longest
+stable run. After three holds, the session target and tolerance
+are derived:
+\begin{align}
+\text{target} &= \text{mean}(\text{plateau}_{1..3}) \\
+\text{tolerance} &= \max(0.5^{\circ},\; 2 \times \text{SD}(\text{plateau}_{1..3}))
+\end{align}
+The 0.5$^{\circ}$ floor prevents a coincidentally tight calibration
+from making subsequent practice impossible; the SD-based scaling
+gives more variable patients a more forgiving band.
+
+\paragraph{Phase 3 --- Practice (5 holds with position-match coaching).}
+The patient is coached to reproduce the target across five
+practice holds. During each hold the algorithm tracks two signals:
+\emph{stability} (in-hold rolling SD below an adaptive threshold)
+and \emph{position} (current pitch within $\pm$tolerance of
+target). Audio cues fire only on stable transitions:
+``a little deeper'' (below target), ``ease back a touch'' (above
+target), or ``right there, hold steady'' (on target). The user
+interface includes a dashed target ring rendered around an animated
+breath orb at the size the orb should reach when the patient is on
+target; the patient inhales until the live orb fills the ring.
+Time-on-target accumulates toward the duration goal (default 20
+seconds, configurable 15--35).
+
+\paragraph{Phase 4 --- Report.}
+Per-session metrics include: per-hold longest stable run, longest
+on-target run, plateau pitch, plateau SD, drift events,
+time-to-lock, and total duration. The headline clinical metric is
+the standard deviation of plateau pitch across the five practice
+holds --- the patient's intra-session reproducibility.
+
+\subsection{Adaptive stability detection}
+
+In-hold stability is determined every 100\,ms by comparing the
+2-second rolling SD of pitch to an adaptive threshold:
+\begin{equation}
+\theta_{\text{stable}} = \mathrm{clamp}\!\left(0.7 \times \mathrm{SD}_{\text{breathing}},\; 0.08^{\circ},\; 1.2^{\circ}\right)
+\end{equation}
+The 0.7 multiplier was chosen to leave clean holds comfortably
+below threshold across the two breathing modes observed
+(Section~\ref{sec:results}). A hysteretic state machine prevents
+flapping: a transition into ``stable'' must persist for 1.0\,s
+before a \emph{lock} event fires; a transition out must persist
+for 1.5\,s before \emph{drift} fires. The first lock during a hold
+emits the \texttt{locked\_in} cue with a haptic confirmation buzz;
+subsequent locks after a drift emit \texttt{regained}.
+
+\subsection{Auto-release}
+
+Two paths automatically end a hold. First, once the patient has
+locked at least once, a sustained SD spike above
+$3\times\theta_{\text{stable}}$ for 1.5\,s ends the hold; this
+detects exhalation as a movement event rather than as an absolute
+pitch change, which proved unreliable for low-amplitude patients
+(see Section~\ref{sec:results}). Second, a 5-second grace timer
+fires after \texttt{target\_reached} so that successful holds end
+gracefully rather than running indefinitely.
+
+\subsection{Audio coaching}
+
+The coaching script comprises 26 fixed phrases covering
+calibration, Learn-phase progression, stability events
+(locked / drifting / regained), position cues
+(deeper / ease / right-there), and session bookends. To eliminate
+runtime synthesis cost and latency, each phrase is rendered once
+to MP3 via the ElevenLabs API (model
+\texttt{eleven\_multilingual\_v2}, voice ``Rachel'') and served
+from \texttt{public/audio/}. A \texttt{playClip(key)} helper pauses
+any in-flight clip and starts the requested one; if the file is
+missing or autoplay is blocked, the helper falls back to the
+browser's \texttt{SpeechSynthesis} API for the same text. Haptic
+confirmations use \texttt{navigator.vibrate}, supported on Android
+Chrome but not iOS Safari.
+
+\section{Results}\label{sec:results}
+
+We recorded two illustrative sessions on an Apple iPhone running
+iOS 18 / Safari, with the multi-channel lab tool
+(\texttt{/lab}) capturing all 13 sensor channels at $\approx$58\,Hz.
+The two sessions were performed by a single subject and differed
+only in breathing strategy and phone placement.
+
+\paragraph{Belly-mode (phone centered, abdominal breathing).}
+The phone was laid flat in landscape with its long axis across the
+abdomen at the level of the umbilicus; the subject deliberately
+held their chest tight and inhaled diaphragmatically. Across two
+holds:
+\begin{itemize}
+  \item Normal-breathing pitch SD: 0.81$^{\circ}$;\, in-hold SD: 0.07$^{\circ}$ (ratio 11$\times$).
+  \item Pitch range during inhale: $\sim\!5^{\circ}$.
+  \item Hold mean pitch was indistinguishable from baseline mean ($-1.5^{\circ}$ vs.\ $-1.5^{\circ}$).
+\end{itemize}
+
+The phone here acted essentially as a passive translation sensor
+rather than a lever: bilateral abdominal rise lifted both ends
+together, and the rotational signal during a deep inhale was
+trivial. Stability detection still worked, since the patient was
+quiet enough during the hold that the ratio was large, but
+absolute pitch carried no information about depth and the breath
+orb visualisation was static.
+
+\paragraph{Chest-mode (phone bridging sternum to upper belly,
+DIBH-style breathing).} The phone was placed in portrait with the
+charging-port edge anchored on the sternum, the rest extending
+caudally; the subject performed full chest-led DIBH-style holds.
+Across one guided 20-second hold and one extended free-form hold:
+\begin{itemize}
+  \item Normal-breathing pitch SD: 0.99$^{\circ}$;\, in-hold SD: 0.13$^{\circ}$ (ratio 6$\times$).
+  \item Pitch range during inhale: $\sim\!14^{\circ}$.
+  \item Adaptive threshold $\theta_{\text{stable}} = 0.69^{\circ}$ comfortably separated the in-hold SD (0.13$^{\circ}$) from breathing SD (0.99$^{\circ}$).
+\end{itemize}
+
+The sternum-bridging placement transformed the signal: the chest
+expansion produced a measurable several-degree pitch swing that
+drove the breath orb visualisation, and the in-hold SD remained
+small enough that the algorithm cleanly locked. The 6$\times$
+hold-to-breathing SD ratio is smaller than the 11$\times$ of
+belly-mode (the chest never fully comes to rest the way a tight
+chest does), but is far more clinically appropriate: chest-led
+DIBH is what produces the cardiac displacement on which the entire
+technique depends.
+
+\paragraph{Algorithm validation.} A simulation of the production
+algorithm against the chest-mode recording correctly identified the
+target-setting hold's stable plateau (15.8\,s of stable run within
+a 19.5\,s hold), correctly classified a partial hold (1.4\,s
+stable within 6.8\,s of effort) as a non-attempt, and correctly
+flagged a single in-hold drift event during a long held attempt.
+Subjective testing of the position-match coaching is in progress;
+a planned single-arm feasibility study will quantify
+inter-session plateau drift in 30--50 left-breast DIBH patients
+between sim and the first treatment fraction.
+
+\section{Discussion}
+
+\paragraph{Differentiation from prior work.} Tide deliberately occupies
+a different point in the design space from existing
+smartphone-based DIBH tools. Capaldi 2020 (IRF) and Capaldi 2026
+(iSGRT) target in-vault SGRT replacement: the patient is on the
+treatment table, the phone is mounted on a precision arm, and
+sub-millimetre accuracy is required~\cite{capaldi2020,capaldi2026}.
+The DIBH-app (Sweden) and the Mitchell preparatory app are
+educational interventions designed to reduce pre-simulation
+anxiety and improve patient understanding, but do not
+quantitatively coach the breath-hold
+itself~\cite{dibhapp,mitchell2025prep}. Tide is patient-facing and
+quantitative, but designed for at-home practice between sim and
+treatment, where reproducibility of the patient's
+\emph{personal target} matters far more than absolute positional
+accuracy. The choice of a browser delivery model (no App Store
+review, single codebase across iOS and Android, doctor-texts-a-URL
+distribution) is a direct reflection of this design constraint.
+
+\paragraph{Adaptive thresholds.} Our preliminary recordings make
+clear that no fixed stability threshold can serve a population:
+breathing-pitch SD differs by an order of magnitude across
+breathing strategies, and would differ further across body
+habitus, phone placement, and patient compliance. The adaptive
+threshold ($0.7 \times \text{breathingSD}$) was specifically
+chosen to leave both observed modes a comfortable margin below
+threshold. Wider validation may motivate further refinement, but
+the principle of per-session adaptation is, we believe, essential.
+
+\paragraph{Stability versus position.} A common failure mode in
+early prototypes was rewarding ``hold still anywhere''. The Learn
+phase, by averaging three comfortable holds, defines a
+patient-specific target plateau, and Practice rewards only the
+intersection of stability and position-match. This corresponds
+directly to the clinical reality that DIBH cardiac sparing
+requires a particular chest position, not just any held position.
+
+\paragraph{Limitations.} Three caveats merit emphasis. First, the
+results above are from a single subject across two breathing
+modes; population-level validation is essential and is the subject
+of forthcoming work. Second, Tide does not measure absolute lung
+volume or absolute chest position; it measures relative pitch and
+is calibrated per-session, so cross-session drift is currently
+unobservable. (A localStorage-based cross-session anchor is
+deferred future work; see TODO.md.) Third, the application is
+intentionally framed as a wellness / practice tool, not a Software
+as a Medical Device; any cross-over to clinical decision support
+would require a 510(k) regulatory pathway, likely with iSGRT or
+RPM as the predicate device. Fourth, the patent landscape includes
+Capaldi et al.'s pending Surface Audio-Visual Biofeedback (SAVB)
+patent (assigned to UCSF / Stanford), whose claim language we have
+not yet reviewed in detail; Tide's home-use framing and absence of
+LiDAR may render this moot, but a formal review is required before
+any commercial path.
+
+\paragraph{Forthcoming work.}
+Planned next steps include (i) a single-arm IRB-approved feasibility
+study at MD Anderson Cancer Center comparing intra-session
+plateau-pitch SD to a same-day simulator measurement; (ii)
+re-recording of the coaching audio with Belisa Vranich's voice, in
+keeping with her existing clinical-psychology breathing
+instruction methodology; (iii) outreach to the Capaldi group at
+UCSF for a possible joint validation study positioning Tide as
+the at-home companion to in-vault iSGRT; and (iv) a
+cross-session anchor for inter-day plateau drift readout.
+
+\section{Conclusions}
+
+A browser-based smartphone application leveraging
+\texttt{DeviceOrientationEvent} fused attitude can capture
+sufficient signal to coach DIBH reproducibility at home, with
+adaptive per-session calibration and position-match audio
+feedback. Phone placement as a lever across the chest-belly seam
+is essential to translate chest expansion into a usable rotational
+signal. Tide complements rather than replaces in-clinic SGRT and
+fills the practice gap between simulation and treatment.
+
+\section*{Disclosures}
+
+The authors report no conflicts of interest.
+
+\section*{Sources of support}
+
+Investigator-initiated. No external funding.
+
+\section*{Declaration of generative AI assistance}
+
+During the development of this application and preparation of this
+manuscript, the authors used Anthropic's Claude (model: Opus 4.7,
+1M context) as a coding assistant and writing aid. All algorithm
+design decisions, sensor analyses, and clinical positioning were
+reviewed and approved by the human authors.
+
+\bibliographystyle{elsarticle-num}
+\bibliography{refs}
+
+\end{document}
