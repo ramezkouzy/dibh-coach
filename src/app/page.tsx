@@ -497,7 +497,7 @@ export default function Page() {
   const gravityZRef = useRef(0);
 
   const [baseline, setBaseline] = useState<Baseline | null>(null);
-  const [holdTarget, setHoldTarget] = useState<number>(25);
+  const [holdTarget, setHoldTarget] = useState<number>(20);
   const [holdsPerSession, setHoldsPerSession] = useState<number>(3);
   const [voiceOn, setVoiceOn] = useState(true);
   const [hapticsOn, setHapticsOn] = useState(true);
@@ -1278,6 +1278,7 @@ function Session({
   });
 
   // Per-hold runtime accumulators.
+  const algoEventsRef = useRef<{ t: number; type: string; meta?: unknown }[]>([]);
   const peakDevRef = useRef(0);
   const stableMsAccumRef = useRef(0);
   const currentRunStartRef = useRef<number | null>(null);
@@ -1291,6 +1292,7 @@ function Session({
   const releaseCandidateSinceRef = useRef<number | null>(null);
 
   const resetHoldState = useCallback(() => {
+    algoEventsRef.current = [];
     peakDevRef.current = 0;
     stableMsAccumRef.current = 0;
     currentRunStartRef.current = null;
@@ -1306,6 +1308,15 @@ function Session({
     setIsStable(false);
     setReachedTargetThisHold(false);
     setBreathScale(0);
+  }, []);
+
+  const logEvent = useCallback((type: string, meta?: unknown) => {
+    const startedAt = holdStartRef.current ?? performance.now();
+    algoEventsRef.current.push({
+      t: +(performance.now() - startedAt).toFixed(1),
+      type,
+      meta,
+    });
   }, []);
 
   const finishHold = useCallback(() => {
@@ -1337,6 +1348,30 @@ function Session({
       reachedTarget: longestRunMsRef.current / 1000 >= holdTarget,
     };
     holdsRef.current.push(h);
+    logEvent("finish");
+    // Best-effort telemetry: capture full per-hold trace + all algorithm
+    // events. Sliced from traceRef so we only ship the hold window.
+    const samples = traceRef.current
+      .filter((d) => d.t >= start && d.t <= start + totalMs)
+      .map((d) => ({ t: +(d.t - start).toFixed(1), p: +d.p.toFixed(3) }));
+    const payload = {
+      kind: "session-hold",
+      holdIndex: h.index,
+      settings: { holdTarget, holdsPerSession },
+      baseline,
+      summary: h,
+      events: algoEventsRef.current,
+      samples,
+      ua: typeof navigator !== "undefined" ? navigator.userAgent : "",
+      at: new Date().toISOString(),
+    };
+    fetch("/api/log", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(payload),
+    }).catch(() => {
+      // best-effort
+    });
     cueRef.current("release_breath");
     buzzRef.current(40);
     setStage("exhale");
@@ -1352,7 +1387,16 @@ function Session({
         setStage("idle");
       }
     }, 4500);
-  }, [holdIdx, holdTarget, holdsPerSession, onComplete, resetHoldState, traceRef]);
+  }, [
+    holdIdx,
+    holdTarget,
+    holdsPerSession,
+    onComplete,
+    resetHoldState,
+    traceRef,
+    baseline,
+    logEvent,
+  ]);
 
   // Stability + breath-scale loop during the hold
   useEffect(() => {
@@ -1391,8 +1435,13 @@ function Session({
           setIsStable(true);
           if (firstLockAtRef.current == null) firstLockAtRef.current = now;
           currentRunStartRef.current = now;
-          if (driftEventsRef.current === 0) cueRef.current("locked_in");
-          else cueRef.current("regained");
+          if (driftEventsRef.current === 0) {
+            logEvent("locked_in", { sd: +sd.toFixed(3), threshold: +adaptiveThreshold.toFixed(3) });
+            cueRef.current("locked_in");
+          } else {
+            logEvent("regained", { sd: +sd.toFixed(3) });
+            cueRef.current("regained");
+          }
           buzzRef.current(50);
         } else if (!wantStable && isStable) {
           setIsStable(false);
@@ -1405,6 +1454,7 @@ function Session({
             }
             currentRunStartRef.current = null;
           }
+          logEvent("drifting", { sd: +sd.toFixed(3), threshold: +adaptiveThreshold.toFixed(3) });
           cueRef.current("drifting");
           buzzRef.current([100, 100, 100]);
         }
@@ -1427,6 +1477,7 @@ function Session({
           targetCueFiredRef.current = true;
           targetReachedAtRef.current = now;
           setReachedTargetThisHold(true);
+          logEvent("target_reached");
           cueRef.current("target_reached");
           buzzRef.current([100, 50, 100, 50, 250]);
         }
@@ -1440,6 +1491,7 @@ function Session({
         if (releaseCandidateSinceRef.current == null) {
           releaseCandidateSinceRef.current = now;
         } else if (now - releaseCandidateSinceRef.current > RELEASE_SUSTAIN_MS) {
+          logEvent("auto_release_sd", { sd: +sd.toFixed(3) });
           finishHold();
           return;
         }
@@ -1453,19 +1505,27 @@ function Session({
         targetReachedAtRef.current != null &&
         now - targetReachedAtRef.current > POST_TARGET_AUTOEND_MS
       ) {
+        logEvent("auto_release_post_target");
         finishHold();
         return;
       }
     }, 100);
     return () => clearInterval(id);
-  }, [stage, baseline, holdTarget, isStable, pitchRef, traceRef, finishHold]);
+  }, [stage, baseline, holdTarget, isStable, pitchRef, traceRef, finishHold, logEvent]);
 
   const startHold = () => {
     resetHoldState();
     setStage("active");
-    cueRef.current("inhale_cue");
     holdStartRef.current = performance.now();
     lastSampleAtRef.current = performance.now();
+    logEvent("hold_start", {
+      breathingSD: +baseline.breathingSD.toFixed(3),
+      adaptiveThreshold: +Math.max(
+        STABLE_SD_FLOOR,
+        Math.min(STABLE_SD_CEILING, baseline.breathingSD * STABLE_SD_FRAC_OF_BASELINE),
+      ).toFixed(3),
+    });
+    cueRef.current("inhale_cue");
   };
 
   const orbMood: OrbMood =
