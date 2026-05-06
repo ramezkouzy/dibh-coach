@@ -1,46 +1,110 @@
 "use client";
 
-import { useEffect, useRef, useState, useCallback } from "react";
+import { useEffect, useRef, useState, useCallback, type ReactNode } from "react";
 import { playClip, preloadAll, unlockAudio, type PhraseKey } from "@/audio";
 
-type Phase = "intro" | "position" | "calibrate" | "learn" | "practice" | "report";
+// ─── Soft Bloom palette (Tide direction B) ──────────────────────────────────
+const P = {
+  bg: "#f5eef0",
+  bgGrad: "linear-gradient(180deg, #f5eef0 0%, #e8eef5 100%)",
+  ink: "#3a3346",
+  ink2: "#5b5468",
+  muted: "#9892a3",
+  hairline: "rgba(58,51,70,0.1)",
+  accent: "#c69cb3",
+  accentDeep: "#8b6c84",
+  sky: "#a8c1de",
+  skyDeep: "#6f8db1",
+  halo: "rgba(198,156,179,0.5)",
+  haloSky: "rgba(168,193,222,0.4)",
+  blob1: "rgba(198,156,179,0.45)",
+  blob2: "rgba(168,193,222,0.4)",
+  blob3: "rgba(240,216,230,0.6)",
+  good: "#7aa884",
+  warn: "#d99466",
+};
 
+type Phase = "welcome" | "placement" | "calibration" | "session" | "complete";
+
+type Baseline = { meanPitch: number; amplitudeDeg: number };
 type Hold = {
-  durationSec: number;
-  peakPitch: number;
-  meanPitchInHold: number;
-  inZonePct: number;
+  index: number;
+  totalDurationSec: number;
+  stableSec: number; // total accumulated time inside stability tolerance
+  longestRunSec: number; // longest single contiguous stable run
+  driftEvents: number;
+  timeToLockSec: number | null; // seconds from "start" to first stability lock
+  plateauPitch: number | null; // median pitch during the longest stable run
+  plateauSD: number | null; // SD during the longest stable run
+  reachedTarget: boolean;
 };
 
-type Baseline = {
-  meanPitch: number;
-  amplitudeDeg: number;
-};
+// ─── Tunables ───────────────────────────────────────────────────────────────
+const STABILITY_WINDOW_MS = 2000; // SD over the last N ms = stability check
+const STABLE_SD_DEG = 0.6; // pitch SD below this = "stable"
+const STABLE_DEBOUNCE_MS = 1200; // must hold stability for this long before "lock" event
+const DRIFT_DEBOUNCE_MS = 1500; // out-of-stable for this long before "drift" event
+const RELEASE_PITCH_FRAC = 0.4; // pitch must drop below baseline + (frac * peak) for >RELEASE_TIME to count as released
+const RELEASE_TIME_MS = 1500;
+const CALIBRATE_SEC = 12;
+const CALIBRATE_SETTLE_SEC = 2;
+const HOLD_TARGET_OPTIONS = [15, 20, 25, 30, 35] as const;
+const HOLDS_PER_SESSION_OPTIONS = [1, 2, 3, 4, 5] as const;
 
-type Plateau = {
-  targetPitch: number;
-  toleranceDeg: number;
-  peaks: number[];
-};
-
-const HOLD_SECONDS = 10;
-const PRACTICE_HOLDS = 5;
-const LEARN_HOLDS = 5;
-const CALIBRATE_SECONDS = 20;
-
-// Coaching audio is delivered via prerecorded MP3 clips through playClip().
-// See src/audio.ts for the phrase catalogue and fallback behaviour.
-
+// ─── Helpers ────────────────────────────────────────────────────────────────
 function fmt(n: number, digits = 1) {
   return n.toFixed(digits);
 }
 
-// Count zero-crossings of (signal - mean). Each full breath cycle has 2 crossings.
-// Returns estimated breaths per minute over the given duration.
+function haptic(pattern: number | number[]) {
+  if (typeof navigator !== "undefined" && typeof navigator.vibrate === "function") {
+    try {
+      navigator.vibrate(pattern);
+    } catch {
+      // ignore
+    }
+  }
+}
+
+// SD over a time window in a time-tagged buffer
+function rollingSD(data: { t: number; p: number }[], windowMs: number): number {
+  if (data.length === 0) return 0;
+  const cutoff = data[data.length - 1].t - windowMs;
+  let sum = 0,
+    count = 0,
+    sumSq = 0;
+  for (let i = data.length - 1; i >= 0; i--) {
+    if (data[i].t < cutoff) break;
+    const v = data[i].p;
+    sum += v;
+    sumSq += v * v;
+    count++;
+  }
+  if (count < 4) return Infinity;
+  const mean = sum / count;
+  const variance = Math.max(0, sumSq / count - mean * mean);
+  return Math.sqrt(variance);
+}
+
+// median + SD of all samples within a [tStart, tEnd] window
+function summarizeRange(
+  data: { t: number; p: number }[],
+  tStart: number,
+  tEnd: number,
+): { median: number; sd: number; n: number } | null {
+  const slice = data.filter((d) => d.t >= tStart && d.t <= tEnd).map((d) => d.p);
+  if (slice.length < 4) return null;
+  const sorted = [...slice].sort((a, b) => a - b);
+  const median = sorted[Math.floor(sorted.length / 2)];
+  const mean = slice.reduce((a, b) => a + b, 0) / slice.length;
+  const variance = slice.reduce((a, b) => a + (b - mean) ** 2, 0) / slice.length;
+  return { median, sd: Math.sqrt(variance), n: slice.length };
+}
+
+// Estimate breath rate from samples (zero-crossings of pitch − mean)
 function estimateBreathRate(samples: number[], durationSec: number) {
   if (samples.length < 4 || durationSec <= 0) return 0;
   const mean = samples.reduce((a, b) => a + b, 0) / samples.length;
-  // Hysteresis to avoid noise crossings: only count when we move past mean ± 0.2°.
   const hys = 0.2;
   let crossings = 0;
   let state: "above" | "below" | "neutral" = "neutral";
@@ -53,58 +117,399 @@ function estimateBreathRate(samples: number[], durationSec: number) {
       state = "below";
     }
   }
-  const breaths = crossings / 2;
-  return (breaths * 60) / durationSec;
+  return ((crossings / 2) * 60) / durationSec;
 }
 
-// Find the most stable contiguous window (by SD) of approximately `windowSec`
-// seconds inside a time-tagged sample buffer. Returns the median and SD of
-// that window, plus its start/end timestamps. If nothing usable, returns null.
-function findStablePlateau(
-  data: { t: number; p: number }[],
-  windowSec = 4,
-): { median: number; sd: number; tStart: number; tEnd: number } | null {
-  if (data.length < 8) return null;
-  const winMs = windowSec * 1000;
-  let best: { median: number; sd: number; tStart: number; tEnd: number } | null = null;
-  // Slide one sample at a time. Cheap: O(n*win) but our win is small (<200 samples).
-  for (let i = 0; i < data.length; i++) {
-    const tEnd = data[i].t + winMs;
-    let j = i;
-    while (j < data.length && data[j].t < tEnd) j++;
-    if (j - i < 8) continue;
-    const slice = data.slice(i, j).map((d) => d.p);
-    const m = slice.reduce((a, b) => a + b, 0) / slice.length;
-    const variance =
-      slice.reduce((a, b) => a + (b - m) ** 2, 0) / slice.length;
-    const sd = Math.sqrt(variance);
-    if (!best || sd < best.sd) {
-      const sorted = [...slice].sort((a, b) => a - b);
-      const median = sorted[Math.floor(sorted.length / 2)];
-      best = { median, sd, tStart: data[i].t, tEnd: data[j - 1].t };
-    }
+// ─── Visual primitives ──────────────────────────────────────────────────────
+function Blobs({ intense = false }: { intense?: boolean }) {
+  return (
+    <>
+      <div
+        style={{
+          position: "absolute",
+          top: "-20%",
+          left: "-30%",
+          width: "90%",
+          height: "60%",
+          background: `radial-gradient(circle, ${P.blob1}, transparent 70%)`,
+          filter: "blur(20px)",
+          pointerEvents: "none",
+        }}
+      />
+      <div
+        style={{
+          position: "absolute",
+          bottom: "-10%",
+          right: "-30%",
+          width: "90%",
+          height: "60%",
+          background: `radial-gradient(circle, ${P.blob2}, transparent 70%)`,
+          filter: "blur(20px)",
+          pointerEvents: "none",
+        }}
+      />
+      {intense && (
+        <div
+          style={{
+            position: "absolute",
+            top: "20%",
+            right: "-30%",
+            width: "90%",
+            height: "60%",
+            background: `radial-gradient(circle, ${P.blob3}, transparent 70%)`,
+            filter: "blur(20px)",
+            pointerEvents: "none",
+          }}
+        />
+      )}
+    </>
+  );
+}
+
+function Btn({
+  children,
+  onClick,
+  variant = "primary",
+  disabled,
+  className = "",
+}: {
+  children: ReactNode;
+  onClick?: () => void;
+  variant?: "primary" | "ghost";
+  disabled?: boolean;
+  className?: string;
+}) {
+  const base =
+    "w-full rounded-full font-semibold text-base transition-transform active:scale-[0.98] disabled:opacity-40 disabled:cursor-not-allowed";
+  if (variant === "primary") {
+    return (
+      <button
+        onClick={onClick}
+        disabled={disabled}
+        className={`${base} h-14 text-white ${className}`}
+        style={{
+          background: `linear-gradient(135deg, ${P.accentDeep}, ${P.skyDeep})`,
+          boxShadow: `0 12px 28px ${P.halo}`,
+          border: "none",
+        }}
+      >
+        {children}
+      </button>
+    );
   }
-  return best;
+  return (
+    <button
+      onClick={onClick}
+      disabled={disabled}
+      className={`${base} h-12 ${className}`}
+      style={{
+        background: "rgba(255,255,255,0.55)",
+        backdropFilter: "blur(10px)",
+        WebkitBackdropFilter: "blur(10px)",
+        color: P.ink2,
+        border: `1px solid ${P.hairline}`,
+        fontSize: 14,
+      }}
+    >
+      {children}
+    </button>
+  );
 }
 
+function Pill({ children }: { children: ReactNode }) {
+  return (
+    <div
+      className="inline-flex items-center gap-1.5 rounded-full text-xs"
+      style={{
+        padding: "6px 12px",
+        background: "rgba(255,255,255,0.7)",
+        color: P.ink2,
+        border: `1px solid ${P.hairline}`,
+      }}
+    >
+      <span
+        className="inline-flex items-center justify-center"
+        style={{
+          width: 14,
+          height: 14,
+          borderRadius: 7,
+          background: P.accent,
+        }}
+      >
+        <svg width="10" height="10" viewBox="0 0 14 14" fill="none">
+          <path d="M3 7.5l3 3 5-7" stroke="#fff" strokeWidth="1.9" strokeLinecap="round" strokeLinejoin="round" />
+        </svg>
+      </span>
+      {children}
+    </div>
+  );
+}
+
+function Card({
+  children,
+  className = "",
+  style,
+}: {
+  children: ReactNode;
+  className?: string;
+  style?: React.CSSProperties;
+}) {
+  return (
+    <div
+      className={`rounded-3xl ${className}`}
+      style={{
+        background: "rgba(255,255,255,0.65)",
+        backdropFilter: "blur(12px)",
+        WebkitBackdropFilter: "blur(12px)",
+        border: `1px solid ${P.hairline}`,
+        ...style,
+      }}
+    >
+      {children}
+    </div>
+  );
+}
+
+function Figure() {
+  return (
+    <svg width="220" height="136" viewBox="0 0 220 136" fill="none">
+      <line x1="6" y1="118" x2="214" y2="118" stroke={P.ink2} strokeWidth="1" strokeDasharray="2 4" opacity="0.3" />
+      <circle cx="32" cy="86" r="14" stroke={P.accentDeep} strokeWidth="1.6" fill="none" />
+      <path d="M46 90 Q 90 86 130 95 Q 170 104 200 110" stroke={P.accentDeep} strokeWidth="1.6" fill="none" strokeLinecap="round" />
+      <path d="M46 100 Q 90 110 130 113 Q 170 116 200 116" stroke={P.accentDeep} strokeWidth="1.6" fill="none" strokeLinecap="round" opacity="0.5" />
+      <path d="M60 96 Q 78 116 102 118" stroke={P.accentDeep} strokeWidth="1.6" fill="none" strokeLinecap="round" />
+      <g transform="translate(98 78) rotate(-6)">
+        <rect x="0" y="0" width="36" height="22" rx="3.5" fill="#fff" stroke={P.accentDeep} strokeWidth="1.4" />
+        <circle cx="18" cy="11" r="3.5" fill={P.accent} />
+      </g>
+      <path d="M104 60 Q 116 52 128 60" stroke={P.accent} strokeWidth="1.4" fill="none" strokeLinecap="round" opacity="0.7" />
+      <path d="M100 50 Q 116 38 132 50" stroke={P.accent} strokeWidth="1.4" fill="none" strokeLinecap="round" opacity="0.45" />
+    </svg>
+  );
+}
+
+type OrbPhase = "rest" | "inhale" | "hold-stable" | "hold-drifting" | "exhale";
+
+function Orb({
+  phase,
+  size = 220,
+  secondsLeft,
+  label,
+}: {
+  phase: OrbPhase;
+  size?: number;
+  secondsLeft?: number | null;
+  label?: string;
+}) {
+  const scale =
+    phase === "inhale"
+      ? 1.0
+      : phase === "hold-stable"
+      ? 1.02
+      : phase === "hold-drifting"
+      ? 0.92
+      : phase === "exhale"
+      ? 0.65
+      : 0.78;
+  const dur = phase === "inhale" ? "3.5s" : phase === "exhale" ? "4.5s" : "0.8s";
+  const haloColor =
+    phase === "hold-drifting"
+      ? "rgba(217,148,102,0.55)" // amber tint
+      : P.halo;
+  return (
+    <div
+      style={{
+        width: size,
+        height: size,
+        position: "relative",
+        display: "flex",
+        alignItems: "center",
+        justifyContent: "center",
+      }}
+    >
+      <div
+        style={{
+          position: "absolute",
+          inset: 0,
+          borderRadius: "50%",
+          background: `radial-gradient(circle at 50% 50%, ${haloColor} 0%, transparent 65%)`,
+          transform: `scale(${scale * 1.05})`,
+          transition: `transform ${dur} cubic-bezier(.4,0,.3,1), background 0.6s ease`,
+          opacity: 0.85,
+        }}
+      />
+      <div
+        style={{
+          position: "absolute",
+          width: "78%",
+          height: "78%",
+          borderRadius: "50%",
+          border: `1px solid ${P.haloSky}`,
+          transform: `scale(${scale * 1.02})`,
+          transition: `transform ${dur} cubic-bezier(.4,0,.3,1)`,
+        }}
+      />
+      <div
+        style={{
+          position: "absolute",
+          width: "60%",
+          height: "60%",
+          borderRadius: "50%",
+          background:
+            phase === "hold-drifting"
+              ? `radial-gradient(circle at 35% 30%, #ffffff 0%, ${P.warn} 75%)`
+              : `radial-gradient(circle at 35% 30%, #ffffff 0%, ${P.accent} 75%)`,
+          transform: `scale(${scale})`,
+          transition: `transform ${dur} cubic-bezier(.4,0,.3,1), background 0.6s ease`,
+          boxShadow: `0 24px 70px ${haloColor}`,
+        }}
+      />
+      {(secondsLeft != null || label) && (
+        <div
+          style={{
+            position: "absolute",
+            textAlign: "center",
+            color: "#fff",
+            textShadow: "0 1px 6px rgba(0,0,0,0.18)",
+            pointerEvents: "none",
+          }}
+        >
+          {secondsLeft != null && (
+            <div
+              style={{
+                fontSize: 64,
+                fontWeight: 200,
+                letterSpacing: -2,
+                fontVariantNumeric: "tabular-nums",
+                lineHeight: 1,
+              }}
+            >
+              {secondsLeft}
+            </div>
+          )}
+          {label && (
+            <div
+              style={{
+                fontSize: 11,
+                letterSpacing: 2,
+                textTransform: "uppercase",
+                marginTop: 4,
+                opacity: 0.9,
+              }}
+            >
+              {label}
+            </div>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function Header({
+  back,
+  step,
+  totalSteps,
+  right,
+}: {
+  back?: () => void;
+  step?: number;
+  totalSteps?: number;
+  right?: ReactNode;
+}) {
+  return (
+    <div
+      className="flex items-center justify-between"
+      style={{ paddingTop: 16, paddingLeft: 16, paddingRight: 16, position: "relative", zIndex: 2 }}
+    >
+      {back ? (
+        <button
+          onClick={back}
+          className="flex items-center justify-center"
+          style={{
+            width: 40,
+            height: 40,
+            borderRadius: 20,
+            background: "rgba(255,255,255,0.7)",
+            backdropFilter: "blur(10px)",
+            WebkitBackdropFilter: "blur(10px)",
+            border: "none",
+            cursor: "pointer",
+          }}
+          aria-label="Back"
+        >
+          <svg width="20" height="20" viewBox="0 0 20 20" fill="none">
+            <path d="M12 4l-6 6 6 6" stroke={P.ink2} strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" />
+          </svg>
+        </button>
+      ) : (
+        <div style={{ width: 40 }} />
+      )}
+      {step != null && totalSteps != null ? (
+        <div
+          style={{
+            width: 80,
+            height: 4,
+            borderRadius: 2,
+            background: P.hairline,
+            position: "relative",
+            overflow: "hidden",
+          }}
+        >
+          <div
+            style={{
+              position: "absolute",
+              left: 0,
+              top: 0,
+              bottom: 0,
+              width: `${(step / totalSteps) * 100}%`,
+              background: `linear-gradient(90deg, ${P.accent}, ${P.sky})`,
+              borderRadius: 2,
+              transition: "width 0.3s ease",
+            }}
+          />
+        </div>
+      ) : (
+        <div />
+      )}
+      <div style={{ minWidth: 40, display: "flex", justifyContent: "flex-end" }}>{right}</div>
+    </div>
+  );
+}
+
+// ─── Main page (sensor wiring + phase routing) ──────────────────────────────
 export default function Page() {
-  const [phase, setPhase] = useState<Phase>("intro");
+  const [phase, setPhase] = useState<Phase>("welcome");
   const [pitch, setPitch] = useState(0);
   const [permissionError, setPermissionError] = useState<string | null>(null);
 
   const pitchRef = useRef(0);
-  const rollRef = useRef(0);
-  const gravityZRef = useRef(0);
   const traceRef = useRef<{ t: number; p: number }[]>([]);
-  const canvasRef = useRef<HTMLCanvasElement | null>(null);
+  const gravityZRef = useRef(0);
 
   const [baseline, setBaseline] = useState<Baseline | null>(null);
-  const [plateau, setPlateau] = useState<Plateau | null>(null);
+  const [holdTarget, setHoldTarget] = useState<number>(25);
+  const [holdsPerSession, setHoldsPerSession] = useState<number>(3);
+  const [voiceOn, setVoiceOn] = useState(true);
+  const [hapticsOn, setHapticsOn] = useState(true);
   const [holds, setHolds] = useState<Hold[]>([]);
 
-  // Wake lock so the screen doesn't blank during a session.
+  const cue = useCallback(
+    (key: PhraseKey) => {
+      if (voiceOn) playClip(key);
+    },
+    [voiceOn],
+  );
+  const buzz = useCallback(
+    (pattern: number | number[]) => {
+      if (hapticsOn) haptic(pattern);
+    },
+    [hapticsOn],
+  );
+
+  // Wake lock during the active session
   useEffect(() => {
-    if (phase === "intro" || phase === "report") return;
+    if (phase === "welcome" || phase === "complete") return;
     let lock: WakeLockSentinel | null = null;
     let cancelled = false;
     const acquire = async () => {
@@ -117,7 +522,7 @@ export default function Page() {
           if (cancelled && lock) lock.release();
         }
       } catch {
-        // Wake lock is best-effort; fall back silently.
+        // best-effort
       }
     };
     acquire();
@@ -132,27 +537,18 @@ export default function Page() {
     };
   }, [phase]);
 
-  // ---- sensor wiring -----------------------------------------------------
-  // We throttle React display updates to ~10 fps so the parent does not re-render
-  // at sensor cadence (~60 Hz). The canvas trace pulls from traceRef directly,
-  // so the visual smoothness is unaffected.
+  // Sensor wiring (orientation = pitch, motion = gravity Z)
   const lastDisplayUpdateRef = useRef(0);
   useEffect(() => {
-    if (phase === "intro") return;
-    const orientHandler = (e: DeviceOrientationEvent) => {
-      // beta = rotation around X (pitch). When phone lies flat on belly screen-up
-      // in portrait orientation, beta sits near 0 and changes as the belly rises
-      // and falls. gamma is roll, used by the positioning gate.
+    if (phase === "welcome") return;
+    const orient = (e: DeviceOrientationEvent) => {
       if (e.beta == null) return;
       const alpha = 0.3;
       const next = pitchRef.current * (1 - alpha) + e.beta * alpha;
       pitchRef.current = next;
-      if (e.gamma != null) {
-        rollRef.current = rollRef.current * (1 - alpha) + e.gamma * alpha;
-      }
       const now = performance.now();
       traceRef.current.push({ t: now, p: next });
-      const cutoff = now - 30_000;
+      const cutoff = now - 60_000;
       while (traceRef.current.length && traceRef.current[0].t < cutoff) {
         traceRef.current.shift();
       }
@@ -161,108 +557,20 @@ export default function Page() {
         setPitch(next);
       }
     };
-    const motionHandler = (e: DeviceMotionEvent) => {
-      // gravity Z tells us which side of the phone is up. Positive Z (toward
-      // viewer) = screen up; negative = screen down. Used in the position gate.
+    const motion = (e: DeviceMotionEvent) => {
       const g = e.accelerationIncludingGravity;
       if (g && g.z != null) {
         gravityZRef.current = gravityZRef.current * 0.7 + g.z * 0.3;
       }
     };
-    window.addEventListener("deviceorientation", orientHandler);
-    window.addEventListener("devicemotion", motionHandler);
+    window.addEventListener("deviceorientation", orient);
+    window.addEventListener("devicemotion", motion);
     return () => {
-      window.removeEventListener("deviceorientation", orientHandler);
-      window.removeEventListener("devicemotion", motionHandler);
+      window.removeEventListener("deviceorientation", orient);
+      window.removeEventListener("devicemotion", motion);
     };
   }, [phase]);
 
-  // ---- live trace render -------------------------------------------------
-  useEffect(() => {
-    if (phase === "intro" || phase === "report") return;
-    let raf = 0;
-    const draw = () => {
-      const canvas = canvasRef.current;
-      if (canvas) {
-        const dpr = window.devicePixelRatio || 1;
-        const w = canvas.clientWidth;
-        const h = canvas.clientHeight;
-        if (canvas.width !== w * dpr) {
-          canvas.width = w * dpr;
-          canvas.height = h * dpr;
-        }
-        const ctx = canvas.getContext("2d");
-        if (ctx) {
-          ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
-          ctx.clearRect(0, 0, w, h);
-          const data = traceRef.current;
-          if (data.length > 1) {
-            let min = Infinity, max = -Infinity;
-            for (const d of data) {
-              if (d.p < min) min = d.p;
-              if (d.p > max) max = d.p;
-            }
-            if (plateau) {
-              min = Math.min(min, plateau.targetPitch - plateau.toleranceDeg * 2);
-              max = Math.max(max, plateau.targetPitch + plateau.toleranceDeg * 2);
-            }
-            if (max - min < 4) {
-              const mid = (min + max) / 2;
-              min = mid - 2;
-              max = mid + 2;
-            }
-            const range = max - min;
-            const t0 = data[0].t;
-            const tN = data[data.length - 1].t;
-            const tRange = Math.max(1, tN - t0);
-            const yOf = (p: number) => h - ((p - min) / range) * h;
-            const xOf = (t: number) => ((t - t0) / tRange) * w;
-
-            if (plateau) {
-              const yTop = yOf(plateau.targetPitch + plateau.toleranceDeg);
-              const yBot = yOf(plateau.targetPitch - plateau.toleranceDeg);
-              ctx.fillStyle = "rgba(34,197,94,0.18)";
-              ctx.fillRect(0, yTop, w, yBot - yTop);
-              ctx.strokeStyle = "rgba(34,197,94,0.6)";
-              ctx.lineWidth = 1;
-              const yMid = yOf(plateau.targetPitch);
-              ctx.setLineDash([4, 4]);
-              ctx.beginPath();
-              ctx.moveTo(0, yMid);
-              ctx.lineTo(w, yMid);
-              ctx.stroke();
-              ctx.setLineDash([]);
-            }
-
-            if (baseline) {
-              ctx.strokeStyle = "rgba(148,163,184,0.4)";
-              ctx.beginPath();
-              const yB = yOf(baseline.meanPitch);
-              ctx.moveTo(0, yB);
-              ctx.lineTo(w, yB);
-              ctx.stroke();
-            }
-
-            ctx.strokeStyle = "#2563eb";
-            ctx.lineWidth = 2;
-            ctx.beginPath();
-            for (let i = 0; i < data.length; i++) {
-              const x = xOf(data[i].t);
-              const y = yOf(data[i].p);
-              if (i === 0) ctx.moveTo(x, y);
-              else ctx.lineTo(x, y);
-            }
-            ctx.stroke();
-          }
-        }
-      }
-      raf = requestAnimationFrame(draw);
-    };
-    raf = requestAnimationFrame(draw);
-    return () => cancelAnimationFrame(raf);
-  }, [phase, baseline, plateau]);
-
-  // ---- permission flow ---------------------------------------------------
   const requestPermission = useCallback(async () => {
     setPermissionError(null);
     const Doc = (typeof DeviceOrientationEvent !== "undefined" ? DeviceOrientationEvent : null) as
@@ -273,8 +581,8 @@ export default function Page() {
       | null;
     if (Doc && typeof Doc.requestPermission === "function") {
       try {
-        const result = await Doc.requestPermission();
-        if (result !== "granted") {
+        const r = await Doc.requestPermission();
+        if (r !== "granted") {
           setPermissionError("Motion access denied. Reload and tap Allow when prompted.");
           return;
         }
@@ -287,289 +595,475 @@ export default function Page() {
       try {
         await Mot.requestPermission();
       } catch {
-        // Non-fatal; orientation alone is enough for the core flow.
+        // non-fatal
       }
     }
     if (typeof window !== "undefined" && !("DeviceOrientationEvent" in window)) {
       setPermissionError("This device does not expose motion sensors.");
       return;
     }
-    // Same gesture: unlock audio and warm the clip cache so non-interactive
-    // playback works through the rest of the session.
     unlockAudio();
     preloadAll();
     traceRef.current = [];
-    setPhase("position");
+    setPhase("placement");
   }, []);
 
+  const restart = () => {
+    setBaseline(null);
+    setHolds([]);
+    traceRef.current = [];
+    setPhase("welcome");
+  };
+
   return (
-    <main className="flex-1 flex flex-col items-center px-4 py-6 max-w-md mx-auto w-full">
-      <Header phase={phase} />
+    <main
+      className="flex-1 flex items-stretch justify-center"
+      style={{
+        background: P.bgGrad,
+        color: P.ink,
+        minHeight: "100dvh",
+      }}
+    >
+      <div
+        className="relative w-full max-w-md flex flex-col"
+        style={{ minHeight: "100dvh", overflow: "hidden" }}
+      >
+        {phase === "welcome" && (
+          <Welcome
+            onStart={requestPermission}
+            permissionError={permissionError}
+            holdTarget={holdTarget}
+            setHoldTarget={setHoldTarget}
+            holdsPerSession={holdsPerSession}
+            setHoldsPerSession={setHoldsPerSession}
+            voiceOn={voiceOn}
+            setVoiceOn={setVoiceOn}
+            hapticsOn={hapticsOn}
+            setHapticsOn={setHapticsOn}
+          />
+        )}
 
-      {phase === "intro" && (
-        <Intro onStart={requestPermission} permissionError={permissionError} />
-      )}
+        {phase === "placement" && (
+          <Placement
+            pitch={pitch}
+            pitchRef={pitchRef}
+            gravityZRef={gravityZRef}
+            onContinue={() => {
+              traceRef.current = [];
+              setPhase("calibration");
+            }}
+            onBack={restart}
+          />
+        )}
 
-      {phase === "position" && (
-        <PositionPhase
-          pitch={pitch}
-          pitchRef={pitchRef}
-          rollRef={rollRef}
-          gravityZRef={gravityZRef}
-          onReady={() => {
-            traceRef.current = [];
-            setPhase("calibrate");
-          }}
-        />
-      )}
+        {phase === "calibration" && (
+          <Calibration
+            pitch={pitch}
+            traceRef={traceRef}
+            onContinue={(b) => {
+              setBaseline(b);
+              traceRef.current = [];
+              setPhase("session");
+            }}
+            onBack={() => setPhase("placement")}
+            cue={cue}
+          />
+        )}
 
-      {phase === "calibrate" && (
-        <CalibratePhase
-          pitch={pitch}
-          canvasRef={canvasRef}
-          traceRef={traceRef}
-          onDone={(b) => {
-            setBaseline(b);
-            traceRef.current = [];
-            setPhase("learn");
-          }}
-        />
-      )}
+        {phase === "session" && baseline && (
+          <Session
+            baseline={baseline}
+            holdTarget={holdTarget}
+            holdsPerSession={holdsPerSession}
+            pitch={pitch}
+            pitchRef={pitchRef}
+            traceRef={traceRef}
+            cue={cue}
+            buzz={buzz}
+            onComplete={(h) => {
+              setHolds(h);
+              setPhase("complete");
+            }}
+            onAbort={restart}
+          />
+        )}
 
-      {phase === "learn" && baseline && (
-        <LearnPhase
-          pitch={pitch}
-          baseline={baseline}
-          canvasRef={canvasRef}
-          traceRef={traceRef}
-          pitchRef={pitchRef}
-          onDone={(p) => {
-            setPlateau(p);
-            traceRef.current = [];
-            setPhase("practice");
-          }}
-        />
-      )}
-
-      {phase === "practice" && baseline && plateau && (
-        <PracticePhase
-          pitch={pitch}
-          baseline={baseline}
-          plateau={plateau}
-          canvasRef={canvasRef}
-          traceRef={traceRef}
-          pitchRef={pitchRef}
-          onDone={(h) => {
-            setHolds(h);
-            setPhase("report");
-          }}
-        />
-      )}
-
-      {phase === "report" && (
-        <Report
-          baseline={baseline}
-          plateau={plateau}
-          holds={holds}
-          onRestart={() => {
-            setBaseline(null);
-            setPlateau(null);
-            setHolds([]);
-            traceRef.current = [];
-            setPhase("intro");
-          }}
-        />
-      )}
+        {phase === "complete" && (
+          <Complete
+            holds={holds}
+            holdTarget={holdTarget}
+            onAgain={() => {
+              setHolds([]);
+              traceRef.current = [];
+              setPhase("placement");
+            }}
+            onDone={restart}
+          />
+        )}
+      </div>
     </main>
   );
 }
 
-function Header({ phase }: { phase: Phase }) {
-  const stepNum =
-    phase === "position"
-      ? 1
-      : phase === "calibrate"
-      ? 2
-      : phase === "learn"
-      ? 3
-      : phase === "practice"
-      ? 4
-      : null;
-  const totalSteps = 4;
-  return (
-    <header className="w-full mb-4">
-      <div className="flex items-center justify-between">
-        <h1 className="text-lg font-semibold tracking-tight">DIBH Coach</h1>
-        {stepNum && <span className="text-xs text-slate-500">Step {stepNum} of {totalSteps}</span>}
-      </div>
-    </header>
-  );
-}
-
-function Intro({
+// ─── Welcome ────────────────────────────────────────────────────────────────
+function Welcome({
   onStart,
   permissionError,
+  holdTarget,
+  setHoldTarget,
+  holdsPerSession,
+  setHoldsPerSession,
+  voiceOn,
+  setVoiceOn,
+  hapticsOn,
+  setHapticsOn,
 }: {
   onStart: () => void;
   permissionError: string | null;
+  holdTarget: number;
+  setHoldTarget: (n: number) => void;
+  holdsPerSession: number;
+  setHoldsPerSession: (n: number) => void;
+  voiceOn: boolean;
+  setVoiceOn: (v: boolean) => void;
+  hapticsOn: boolean;
+  setHapticsOn: (v: boolean) => void;
 }) {
+  const [showSettings, setShowSettings] = useState(false);
   return (
-    <div className="flex-1 flex flex-col gap-4 w-full">
-      <div className="rounded-2xl bg-blue-50 p-5">
-        <h2 className="text-2xl font-semibold mb-2">Practice your breath-hold at home</h2>
-        <p className="text-slate-700">
-          A short, three-step session that helps you reproduce the same deep-inspiration
-          breath-hold you do at the simulator. Built for left-sided breast radiation patients.
-        </p>
-      </div>
-
-      <ol className="space-y-3 text-slate-700">
-        <li className="flex gap-3">
-          <span className="font-mono text-blue-600 font-semibold">1.</span>
-          <span>
-            Lie flat on your back. Place this phone <strong>screen-up on your belly</strong>,
-            held in <strong>portrait</strong>, charging port toward your feet, on the dot your
-            doctor drew.
-          </span>
-        </li>
-        <li className="flex gap-3">
-          <span className="font-mono text-blue-600 font-semibold">2.</span>
-          <span>We&apos;ll check your phone is set right, then record a baseline.</span>
-        </li>
-        <li className="flex gap-3">
-          <span className="font-mono text-blue-600 font-semibold">3.</span>
-          <span>We&apos;ll learn your breath-hold, then practice with audio coaching.</span>
-        </li>
-      </ol>
-
-      <button
-        onClick={onStart}
-        className="mt-2 w-full rounded-xl bg-blue-600 hover:bg-blue-700 text-white font-semibold py-4 text-lg active:scale-[0.99] transition"
+    <div className="relative flex-1 flex flex-col" style={{ overflow: "hidden" }}>
+      <Blobs intense />
+      <Header
+        right={
+          <button
+            onClick={() => setShowSettings((s) => !s)}
+            className="flex items-center justify-center"
+            style={{
+              width: 40,
+              height: 40,
+              borderRadius: 20,
+              background: "rgba(255,255,255,0.7)",
+              backdropFilter: "blur(10px)",
+              WebkitBackdropFilter: "blur(10px)",
+              border: "none",
+              cursor: "pointer",
+            }}
+            aria-label="Settings"
+          >
+            <svg width="20" height="20" viewBox="0 0 20 20" fill="none">
+              <circle cx="10" cy="10" r="2.5" stroke={P.ink2} strokeWidth="1.6" />
+              <path
+                d="M10 1.5v2M10 16.5v2M3.5 3.5l1.4 1.4M15.1 15.1l1.4 1.4M1.5 10h2M16.5 10h2M3.5 16.5l1.4-1.4M15.1 4.9l1.4-1.4"
+                stroke={P.ink2}
+                strokeWidth="1.6"
+                strokeLinecap="round"
+              />
+            </svg>
+          </button>
+        }
+      />
+      <div
+        className="relative flex-1 flex flex-col justify-between"
+        style={{ padding: "60px 32px 40px", zIndex: 1 }}
       >
-        Enable motion sensors & start
-      </button>
-      {permissionError && <p className="text-sm text-red-600">{permissionError}</p>}
-      <p className="text-xs text-slate-500 leading-relaxed mt-2">
-        This is a practice tool, not a medical device. It does not replace any instruction
-        from your radiation oncology team.
-      </p>
+        <div>
+          <div className="flex items-center gap-2.5 mb-8">
+            <div
+              style={{
+                width: 36,
+                height: 36,
+                borderRadius: 18,
+                background: `linear-gradient(135deg, ${P.accent}, ${P.sky})`,
+              }}
+            />
+            <div className="text-sm font-semibold" style={{ color: P.ink }}>
+              Tide
+            </div>
+          </div>
+          <h1
+            style={{
+              fontSize: 44,
+              lineHeight: 1.05,
+              fontWeight: 700,
+              letterSpacing: -1.2,
+              color: P.ink,
+              margin: 0,
+            }}
+          >
+            Hello.<br />
+            Let&apos;s take a<br />
+            <span
+              style={{
+                background: `linear-gradient(135deg, ${P.accentDeep}, ${P.skyDeep})`,
+                WebkitBackgroundClip: "text",
+                WebkitTextFillColor: "transparent",
+              }}
+            >
+              quiet moment.
+            </span>
+          </h1>
+          <p
+            style={{
+              fontSize: 15,
+              lineHeight: 1.6,
+              color: P.ink2,
+              marginTop: 24,
+              maxWidth: 320,
+            }}
+          >
+            We&apos;ll guide you through deep breath holds for your radiation therapy. No
+            pressure — just your breath, and us.
+          </p>
+
+          {showSettings && (
+            <Card className="mt-8 p-5">
+              <div className="text-xs font-semibold uppercase tracking-wider mb-3" style={{ color: P.muted }}>
+                This session
+              </div>
+              <SettingRow label="Hold target">
+                <SegmentedNumber
+                  value={holdTarget}
+                  options={HOLD_TARGET_OPTIONS}
+                  unit="s"
+                  onChange={setHoldTarget}
+                />
+              </SettingRow>
+              <SettingRow label="Holds per session">
+                <SegmentedNumber
+                  value={holdsPerSession}
+                  options={HOLDS_PER_SESSION_OPTIONS}
+                  onChange={setHoldsPerSession}
+                />
+              </SettingRow>
+              <SettingRow label="Voice coaching">
+                <Toggle value={voiceOn} onChange={setVoiceOn} />
+              </SettingRow>
+              <SettingRow last label="Haptics (Android)">
+                <Toggle value={hapticsOn} onChange={setHapticsOn} />
+              </SettingRow>
+            </Card>
+          )}
+        </div>
+
+        <div className="flex flex-col gap-2.5 mt-6">
+          <Btn onClick={onStart}>Begin</Btn>
+          {permissionError && (
+            <p style={{ color: "#b91c1c", fontSize: 13, textAlign: "center", margin: 0 }}>
+              {permissionError}
+            </p>
+          )}
+          <p style={{ fontSize: 11, color: P.muted, textAlign: "center", margin: "4px 0 0", lineHeight: 1.4 }}>
+            A practice tool, not a medical device. Your radiation oncology team&apos;s instructions take precedence.
+          </p>
+        </div>
+      </div>
     </div>
   );
 }
 
-function PositionPhase({
+function SettingRow({ label, children, last = false }: { label: string; children: ReactNode; last?: boolean }) {
+  return (
+    <div
+      className="flex items-center justify-between py-3"
+      style={{ borderBottom: last ? "none" : `1px solid ${P.hairline}` }}
+    >
+      <span style={{ fontSize: 14, color: P.ink, fontWeight: 500 }}>{label}</span>
+      {children}
+    </div>
+  );
+}
+
+function SegmentedNumber<T extends number>({
+  value,
+  options,
+  unit = "",
+  onChange,
+}: {
+  value: T;
+  options: readonly T[];
+  unit?: string;
+  onChange: (v: T) => void;
+}) {
+  return (
+    <div className="flex gap-1" style={{ background: P.hairline, padding: 3, borderRadius: 999 }}>
+      {options.map((o) => (
+        <button
+          key={o}
+          onClick={() => onChange(o)}
+          className="font-semibold text-xs"
+          style={{
+            padding: "6px 10px",
+            borderRadius: 999,
+            border: "none",
+            cursor: "pointer",
+            background: o === value ? "#fff" : "transparent",
+            color: o === value ? P.ink : P.ink2,
+            boxShadow: o === value ? "0 1px 3px rgba(0,0,0,0.08)" : "none",
+            transition: "all 0.15s",
+          }}
+        >
+          {o}
+          {unit}
+        </button>
+      ))}
+    </div>
+  );
+}
+
+function Toggle({ value, onChange }: { value: boolean; onChange: (v: boolean) => void }) {
+  return (
+    <button
+      onClick={() => onChange(!value)}
+      style={{
+        width: 44,
+        height: 26,
+        borderRadius: 13,
+        background: value ? `linear-gradient(135deg, ${P.accent}, ${P.sky})` : "rgba(58,51,70,0.2)",
+        position: "relative",
+        cursor: "pointer",
+        border: "none",
+        transition: "background 0.2s",
+      }}
+      aria-pressed={value}
+    >
+      <span
+        style={{
+          position: "absolute",
+          top: 3,
+          left: value ? 21 : 3,
+          width: 20,
+          height: 20,
+          borderRadius: 10,
+          background: "#fff",
+          boxShadow: "0 1px 3px rgba(0,0,0,0.15)",
+          transition: "left 0.2s",
+        }}
+      />
+    </button>
+  );
+}
+
+// ─── Placement ──────────────────────────────────────────────────────────────
+function Placement({
   pitch,
   pitchRef,
-  rollRef,
   gravityZRef,
-  onReady,
+  onContinue,
+  onBack,
 }: {
   pitch: number;
   pitchRef: React.RefObject<number>;
-  rollRef: React.RefObject<number>;
   gravityZRef: React.RefObject<number>;
-  onReady: () => void;
+  onContinue: () => void;
+  onBack: () => void;
 }) {
-  // "Steady & flat" check: |pitch| and |roll| both small, screen up, and the
-  // values aren't moving much for 2 consecutive seconds.
-  const [status, setStatus] = useState<"hunting" | "ready">("hunting");
-  const [reason, setReason] = useState<string>("Place phone flat, screen-up, on your belly.");
-  const stableSinceRef = useRef<number | null>(null);
-
+  const [ready, setReady] = useState(false);
   useEffect(() => {
     const id = setInterval(() => {
-      const p = pitchRef.current;
-      const r = rollRef.current;
-      const gz = gravityZRef.current;
-      const flat = Math.abs(p) < 25 && Math.abs(r) < 25;
-      const screenUp = gz > 4; // gravity ≈ 9.8 m/s² toward viewer when screen-up
-      if (!screenUp && Math.abs(gz) > 0.1) {
-        setReason("Phone looks face-down. Screen should face up at the ceiling.");
-        stableSinceRef.current = null;
-        setStatus("hunting");
-        return;
-      }
-      if (!flat) {
-        setReason("Lay the phone flat on your belly.");
-        stableSinceRef.current = null;
-        setStatus("hunting");
-        return;
-      }
-      // OK — start the stability timer
-      if (stableSinceRef.current == null) {
-        stableSinceRef.current = performance.now();
-        setReason("Almost there — hold still…");
-        setStatus("hunting");
-        return;
-      }
-      if (performance.now() - stableSinceRef.current > 2000) {
-        setReason("Ready.");
-        setStatus("ready");
-      }
+      const flat = Math.abs(pitchRef.current) < 30;
+      const screenUp = gravityZRef.current > 4 || Math.abs(gravityZRef.current) < 0.1;
+      setReady(flat && screenUp);
     }, 200);
     return () => clearInterval(id);
-  }, [pitchRef, rollRef, gravityZRef]);
+  }, [pitchRef, gravityZRef]);
 
   return (
-    <div className="flex-1 flex flex-col gap-4 w-full">
-      <h2 className="text-xl font-semibold">Position your phone</h2>
-      <p className="text-slate-700 text-sm">
-        Lie flat on your back. Phone <strong>screen-up</strong>, in <strong>portrait</strong>,
-        charging port toward your feet, resting on the dot your doctor drew.
-      </p>
-
+    <div className="relative flex-1 flex flex-col" style={{ overflow: "hidden" }}>
+      <Blobs />
+      <Header back={onBack} step={1} totalSteps={3} />
       <div
-        className={`rounded-2xl p-6 text-center transition-colors ${
-          status === "ready" ? "bg-green-100 text-green-900" : "bg-slate-100 text-slate-700"
-        }`}
+        className="relative flex-1 flex flex-col"
+        style={{ padding: "32px 28px 0", zIndex: 1 }}
       >
-        <div className="text-5xl mb-2">{status === "ready" ? "✓" : "…"}</div>
-        <div className="font-semibold">{reason}</div>
-        <div className="mt-3 text-xs font-mono text-slate-500">
-          pitch {fmt(pitch)}° · roll {fmt(rollRef.current ?? 0)}°
+        <h2
+          style={{
+            fontSize: 30,
+            lineHeight: 1.1,
+            fontWeight: 700,
+            letterSpacing: -0.8,
+            color: P.ink,
+            margin: 0,
+          }}
+        >
+          Lay back, place phone on your belly
+        </h2>
+        <p style={{ fontSize: 14, lineHeight: 1.55, color: P.ink2, marginTop: 12 }}>
+          Just below your ribcage, screen up. We use the phone&apos;s gentle motion to read your breath.
+        </p>
+        <Card
+          className="mt-6 flex items-center justify-center relative"
+          style={{ padding: "32px 20px", overflow: "hidden" }}
+        >
+          <div
+            style={{
+              position: "absolute",
+              top: -40,
+              right: -40,
+              width: 140,
+              height: 140,
+              borderRadius: "50%",
+              background: `radial-gradient(circle, ${P.halo}, transparent 70%)`,
+            }}
+          />
+          <Figure />
+        </Card>
+        <div className="mt-4 flex flex-wrap gap-2">
+          {["Screen up", "Below ribcage", "Loose clothing", "Phone unlocked"].map((t) => (
+            <Pill key={t}>{t}</Pill>
+          ))}
         </div>
+        <Card className="mt-4 p-4 flex items-center justify-between">
+          <div>
+            <div
+              className="text-[10px] uppercase tracking-widest font-semibold"
+              style={{ color: ready ? P.good : P.muted }}
+            >
+              {ready ? "Steady" : "Adjusting…"}
+            </div>
+            <div style={{ fontSize: 12, color: P.muted, marginTop: 2 }}>
+              tilt {fmt(pitch)}°
+            </div>
+          </div>
+          <span
+            style={{
+              fontSize: 18,
+              color: ready ? P.good : P.muted,
+              transition: "color 0.3s",
+            }}
+          >
+            {ready ? "✓" : "…"}
+          </span>
+        </Card>
       </div>
-
-      <button
-        onClick={onReady}
-        className="w-full rounded-xl font-semibold py-4 text-lg bg-blue-600 hover:bg-blue-700 text-white transition"
-      >
-        {status === "ready" ? "Continue to baseline" : "Continue anyway"}
-      </button>
-      <p className="text-xs text-slate-500 text-center">
-        The check above is a hint — tap Continue when you&apos;re lying flat with the phone on
-        your belly, even if it hasn&apos;t turned green.
-      </p>
+      <div style={{ padding: "20px 24px 32px", zIndex: 1, position: "relative" }}>
+        <Btn onClick={onContinue}>{ready ? "I'm in position" : "Continue anyway"}</Btn>
+      </div>
     </div>
   );
 }
 
-const SETTLE_SECONDS = 3; // discard first N seconds of baseline samples
-
-function CalibratePhase({
+// ─── Calibration ────────────────────────────────────────────────────────────
+function Calibration({
   pitch,
-  canvasRef,
   traceRef,
-  onDone,
+  onContinue,
+  onBack,
+  cue,
 }: {
   pitch: number;
-  canvasRef: React.RefObject<HTMLCanvasElement | null>;
   traceRef: React.RefObject<{ t: number; p: number }[]>;
-  onDone: (b: Baseline) => void;
+  onContinue: (b: Baseline) => void;
+  onBack: () => void;
+  cue: (k: PhraseKey) => void;
 }) {
   const [running, setRunning] = useState(false);
-  const [secondsLeft, setSecondsLeft] = useState(CALIBRATE_SECONDS);
+  const [secondsLeft, setSecondsLeft] = useState(CALIBRATE_SEC);
   const [warning, setWarning] = useState<string | null>(null);
   const startedAtRef = useRef<number | null>(null);
-  const onDoneRef = useRef(onDone);
+  const onContinueRef = useRef(onContinue);
   useEffect(() => {
-    onDoneRef.current = onDone;
+    onContinueRef.current = onContinue;
   });
-
-  const stop = useCallback(() => {
-    setRunning(false);
-    setSecondsLeft(CALIBRATE_SECONDS);
-  }, []);
 
   useEffect(() => {
     if (!running) return;
@@ -577,632 +1071,786 @@ function CalibratePhase({
       setSecondsLeft((s) => {
         if (s <= 1) {
           clearInterval(id);
-          const start = startedAtRef.current ?? performance.now() - CALIBRATE_SECONDS * 1000;
-          // Discard the settling window — the patient is often still positioning
-          // the phone in the first few seconds.
-          const settledFrom = start + SETTLE_SECONDS * 1000;
+          const start = startedAtRef.current ?? performance.now() - CALIBRATE_SEC * 1000;
+          const settledFrom = start + CALIBRATE_SETTLE_SEC * 1000;
           const samples = traceRef.current
             .filter((d) => d.t >= settledFrom)
             .map((d) => d.p);
           if (samples.length < 30) {
-            setWarning("Not enough sensor data — make sure motion is enabled and try again.");
-            playClip("baseline_low_data");
+            setWarning("Not enough sensor data yet — try again.");
+            cue("baseline_low_data");
             setRunning(false);
-            return CALIBRATE_SECONDS;
+            return CALIBRATE_SEC;
           }
           const mean = samples.reduce((a, b) => a + b, 0) / samples.length;
           const min = Math.min(...samples);
           const max = Math.max(...samples);
           const amplitude = max - min;
-          const usableSec = CALIBRATE_SECONDS - SETTLE_SECONDS;
+          const usableSec = CALIBRATE_SEC - CALIBRATE_SETTLE_SEC;
           const bpm = estimateBreathRate(samples, usableSec);
 
-          // Sanity gates
-          if (amplitude < 0.5) {
-            setWarning(
-              "Almost no chest movement detected. Make sure the phone is flat on your belly and breathe normally.",
-            );
-            playClip("baseline_no_breath");
+          if (amplitude < 0.4) {
+            setWarning("Almost no breathing detected. Make sure the phone is flat on your belly.");
+            cue("baseline_no_breath");
             setRunning(false);
-            return CALIBRATE_SECONDS;
+            return CALIBRATE_SEC;
           }
-          if (amplitude > 25) {
-            setWarning(
-              "Too much movement — try lying still and breathing normally without talking.",
-            );
-            playClip("baseline_too_much");
+          if (amplitude > 30) {
+            setWarning("Too much movement. Lie still and try once more.");
+            cue("baseline_too_much");
             setRunning(false);
-            return CALIBRATE_SECONDS;
+            return CALIBRATE_SEC;
           }
-          if (bpm > 0 && (bpm < 5 || bpm > 30)) {
-            setWarning(
-              `Breath rate looked off (~${bpm.toFixed(0)} per minute). Breathe naturally and try again.`,
-            );
-            playClip("baseline_odd_rate");
+          if (bpm > 0 && (bpm < 4 || bpm > 30)) {
+            setWarning(`Breathing rate looked off (~${bpm.toFixed(0)}/min). Breathe naturally and retry.`);
+            cue("baseline_odd_rate");
             setRunning(false);
-            return CALIBRATE_SECONDS;
+            return CALIBRATE_SEC;
           }
-
           setWarning(null);
-          playClip("baseline_done");
-          onDoneRef.current({ meanPitch: mean, amplitudeDeg: amplitude });
+          cue("baseline_done");
+          onContinueRef.current({ meanPitch: mean, amplitudeDeg: amplitude });
           return 0;
         }
         return s - 1;
       });
     }, 1000);
     return () => clearInterval(id);
-  }, [running, traceRef]);
+  }, [running, traceRef, cue]);
 
   return (
-    <div className="flex-1 flex flex-col gap-4 w-full">
-      <h2 className="text-xl font-semibold">Baseline</h2>
-      <p className="text-slate-700">
-        Lie flat. Phone screen-up on your belly at the dot. Breathe normally — no holds —
-        for {CALIBRATE_SECONDS} seconds. The first {SETTLE_SECONDS}s are ignored while you settle.
-      </p>
-
-      <Trace canvasRef={canvasRef} pitch={pitch} />
-
-      {warning && (
-        <div className="rounded-xl bg-amber-50 border border-amber-200 p-3 text-sm text-amber-900">
-          {warning}
-        </div>
-      )}
-
-      {!running ? (
-        <button
-          onClick={() => {
-            traceRef.current = [];
-            startedAtRef.current = performance.now();
-            setSecondsLeft(CALIBRATE_SECONDS);
-            setRunning(true);
-            playClip("baseline_intro");
+    <div className="relative flex-1 flex flex-col" style={{ overflow: "hidden" }}>
+      <Blobs />
+      <Header back={onBack} step={2} totalSteps={3} />
+      <div
+        className="relative flex-1 flex flex-col"
+        style={{ padding: "32px 28px 0", zIndex: 1 }}
+      >
+        <h2
+          style={{
+            fontSize: 30,
+            lineHeight: 1.1,
+            fontWeight: 700,
+            letterSpacing: -0.8,
+            color: P.ink,
+            margin: 0,
           }}
-          className="rounded-xl bg-blue-600 hover:bg-blue-700 text-white font-semibold py-4 text-lg"
         >
-          {warning ? `Restart baseline (${CALIBRATE_SECONDS}s)` : `Start baseline (${CALIBRATE_SECONDS}s)`}
-        </button>
-      ) : (
-        <div className="rounded-xl bg-slate-100 py-4 text-center">
-          <div className="text-4xl font-mono font-semibold text-slate-800">{secondsLeft}s</div>
-          <div className="text-sm text-slate-500 mt-1">
-            {CALIBRATE_SECONDS - secondsLeft < SETTLE_SECONDS
-              ? "Settling… keep still"
-              : "Keep breathing normally…"}
-          </div>
-          <button
-            onClick={stop}
-            className="mt-3 text-xs text-slate-500 underline"
+          A few easy breaths
+        </h2>
+        <p style={{ fontSize: 14, lineHeight: 1.55, color: P.ink2, marginTop: 12 }}>
+          Breathe normally. We&apos;re learning what natural feels like for you today.
+        </p>
+        <div className="flex-1 flex flex-col items-center justify-center">
+          <Orb
+            phase={running ? (pitch > 0 ? "inhale" : "exhale") : "rest"}
+            size={200}
+          />
+          <div
+            style={{
+              marginTop: 24,
+              fontSize: 11,
+              color: P.skyDeep,
+              letterSpacing: 2,
+              textTransform: "uppercase",
+              fontWeight: 700,
+            }}
           >
-            Cancel and restart
-          </button>
+            {running ? "Listening" : warning ? "Let's redo" : "Ready when you are"}
+          </div>
+          <div style={{ marginTop: 8, fontSize: 28, color: P.ink, fontWeight: 700 }}>
+            {running ? `${secondsLeft}s` : warning ? "Try again" : `${CALIBRATE_SEC}s baseline`}
+          </div>
+          {warning && (
+            <p
+              style={{
+                fontSize: 13,
+                color: P.warn,
+                marginTop: 10,
+                textAlign: "center",
+                maxWidth: 280,
+              }}
+            >
+              {warning}
+            </p>
+          )}
         </div>
-      )}
-    </div>
-  );
-}
-
-const PLATEAU_WINDOW_SEC = 4; // look for a stable 4s region inside the hold
-const PLATEAU_SD_LIMIT = 1.5; // if no 4s window has SD < this, the hold is unstable
-
-function LearnPhase({
-  pitch,
-  baseline,
-  canvasRef,
-  traceRef,
-  pitchRef,
-  onDone,
-}: {
-  pitch: number;
-  baseline: Baseline;
-  canvasRef: React.RefObject<HTMLCanvasElement | null>;
-  traceRef: React.RefObject<{ t: number; p: number }[]>;
-  pitchRef: React.RefObject<number>;
-  onDone: (p: Plateau) => void;
-}) {
-  const [holdIdx, setHoldIdx] = useState(0);
-  const [stage, setStage] = useState<"idle" | "inhale" | "hold" | "rest">("idle");
-  const [holdSecondsLeft, setHoldSecondsLeft] = useState(HOLD_SECONDS);
-  const [lastHoldNote, setLastHoldNote] = useState<string | null>(null);
-  const peaksRef = useRef<number[]>([]); // signed deviation from baseline
-  const holdStartRef = useRef<number | null>(null);
-  const onDoneRef = useRef(onDone);
-  useEffect(() => {
-    onDoneRef.current = onDone;
-  });
-
-  const finalize = useCallback(() => {
-    const peaks = peaksRef.current;
-    if (peaks.length === 0) return;
-    const mean = peaks.reduce((a, b) => a + b, 0) / peaks.length;
-    const variance =
-      peaks.reduce((a, b) => a + (b - mean) ** 2, 0) / peaks.length;
-    const sd = Math.sqrt(variance);
-    const tolerance = Math.max(1, sd * 1.5);
-    playClip("learn_complete");
-    onDoneRef.current({
-      targetPitch: baseline.meanPitch + mean,
-      toleranceDeg: tolerance,
-      peaks: peaks.map((p) => baseline.meanPitch + p),
-    });
-  }, [baseline]);
-
-  const runHold = useCallback(() => {
-    setLastHoldNote(null);
-    setStage("inhale");
-    playClip("learn_inhale");
-    setTimeout(() => {
-      setStage("hold");
-      playClip("learn_hold");
-      holdStartRef.current = performance.now();
-      let s = HOLD_SECONDS;
-      setHoldSecondsLeft(s);
-      const tick = setInterval(() => {
-        s -= 1;
-        setHoldSecondsLeft(s);
-        if (s <= 0) {
-          clearInterval(tick);
-          const start = holdStartRef.current ?? performance.now();
-          const data = traceRef.current.filter((d) => d.t >= start);
-
-          let plateauPitch: number;
-          let isStable = false;
-          let note = "";
-          const stable = findStablePlateau(data, PLATEAU_WINDOW_SEC);
-          if (stable && stable.sd <= PLATEAU_SD_LIMIT) {
-            plateauPitch = stable.median;
-            isStable = true;
-            note = `Plateau locked (SD ${stable.sd.toFixed(2)}°)`;
-          } else if (stable) {
-            // Found a window but it was wobbly — still record but flag
-            plateauPitch = stable.median;
-            note = `Hold was a bit wobbly (SD ${stable.sd.toFixed(2)}°). Tap Redo if it didn't feel right.`;
-          } else if (data.length > 0) {
-            plateauPitch =
-              data.reduce((a, b) => a + b.p, 0) / data.length;
-            note = "Short hold — used overall mean. Tap Redo if you want.";
-          } else {
-            plateauPitch = pitchRef.current;
-            note = "No samples captured. Please redo.";
-          }
-
-          const deviation = plateauPitch - baseline.meanPitch;
-          // Stash provisionally — if the user taps Redo we replace it.
-          peaksRef.current.push(deviation);
-          setLastHoldNote(note);
-          playClip(isStable ? "learn_release_good" : "learn_release");
-          setStage("rest");
-        }
-      }, 1000);
-    }, 4000);
-  }, [baseline, traceRef, pitchRef]);
-
-  const acceptAndContinue = () => {
-    const next = holdIdx + 1;
-    if (next >= LEARN_HOLDS) {
-      finalize();
-    } else {
-      setHoldIdx(next);
-      setStage("idle");
-      setLastHoldNote(null);
-    }
-  };
-
-  const redoHold = () => {
-    // Drop the last recorded peak and rerun the same hold index.
-    peaksRef.current.pop();
-    setStage("idle");
-    setLastHoldNote(null);
-  };
-
-  return (
-    <div className="flex-1 flex flex-col gap-4 w-full">
-      <h2 className="text-xl font-semibold">Learn your breath-hold</h2>
-      <p className="text-slate-700">
-        Five holds. We&apos;ll cue you. Take a deep breath in, hold it for {HOLD_SECONDS} seconds,
-        then release. Phone stays flat on your belly.
-      </p>
-
-      <Trace canvasRef={canvasRef} pitch={pitch} />
-
-      <div className="rounded-xl bg-slate-100 p-4 text-center">
-        <div className="text-sm text-slate-500">
-          Hold {Math.min(holdIdx + 1, LEARN_HOLDS)} of {LEARN_HOLDS}
-          {peaksRef.current.length > 0 &&
-            ` · captured ${peaksRef.current.length}`}
-        </div>
-        {stage === "idle" && (
-          <button
-            onClick={runHold}
-            className="mt-3 w-full rounded-xl bg-blue-600 hover:bg-blue-700 text-white font-semibold py-3"
+      </div>
+      <div style={{ padding: "20px 24px 32px", zIndex: 1, position: "relative" }}>
+        {!running ? (
+          <Btn
+            onClick={() => {
+              traceRef.current = [];
+              startedAtRef.current = performance.now();
+              setSecondsLeft(CALIBRATE_SEC);
+              setWarning(null);
+              setRunning(true);
+              cue("baseline_intro");
+            }}
           >
-            Start hold {holdIdx + 1}
-          </button>
-        )}
-        {stage === "inhale" && (
-          <div className="mt-3 text-2xl font-semibold text-blue-700">Breathe in…</div>
-        )}
-        {stage === "hold" && (
-          <div className="mt-3">
-            <div className="text-3xl font-mono font-semibold text-blue-700">{holdSecondsLeft}s</div>
-            <div className="text-sm text-slate-500">Hold it</div>
-          </div>
-        )}
-        {stage === "rest" && (
-          <div className="mt-3 flex flex-col gap-2">
-            <div className="text-lg text-slate-700">Release. Breathe.</div>
-            {lastHoldNote && (
-              <div className="text-xs text-slate-500">{lastHoldNote}</div>
-            )}
-            <div className="grid grid-cols-2 gap-2 mt-2">
-              <button
-                onClick={redoHold}
-                className="rounded-xl bg-slate-200 hover:bg-slate-300 text-slate-800 font-semibold py-2"
-              >
-                Redo
-              </button>
-              <button
-                onClick={acceptAndContinue}
-                className="rounded-xl bg-blue-600 hover:bg-blue-700 text-white font-semibold py-2"
-              >
-                {holdIdx + 1 >= LEARN_HOLDS ? "Finish" : "Next hold"}
-              </button>
-            </div>
-          </div>
+            {warning ? "Restart baseline" : "Start"}
+          </Btn>
+        ) : (
+          <Btn variant="ghost" onClick={() => setRunning(false)}>
+            Cancel
+          </Btn>
         )}
       </div>
     </div>
   );
 }
 
-type ZoneState = "below" | "inZone" | "above" | "wayOff";
+// ─── Session — the heart of the app ─────────────────────────────────────────
+type SessionStage = "idle" | "inhale" | "hold" | "exhale" | "between";
 
-const DRIFT_LIMIT_MS = 3000; // sustained out-of-zone before "release" cue
-const REASSURE_INTERVAL_MS = 2500; // how often to re-speak "hold steady"
-
-function PracticePhase({
-  pitch,
+function Session({
   baseline,
-  plateau,
-  canvasRef,
-  traceRef,
+  holdTarget,
+  holdsPerSession,
+  pitch,
   pitchRef,
-  onDone,
+  traceRef,
+  cue,
+  buzz,
+  onComplete,
+  onAbort,
 }: {
-  pitch: number;
   baseline: Baseline;
-  plateau: Plateau;
-  canvasRef: React.RefObject<HTMLCanvasElement | null>;
-  traceRef: React.RefObject<{ t: number; p: number }[]>;
+  holdTarget: number;
+  holdsPerSession: number;
+  pitch: number;
   pitchRef: React.RefObject<number>;
-  onDone: (h: Hold[]) => void;
+  traceRef: React.RefObject<{ t: number; p: number }[]>;
+  cue: (k: PhraseKey) => void;
+  buzz: (p: number | number[]) => void;
+  onComplete: (h: Hold[]) => void;
+  onAbort: () => void;
 }) {
   const [holdIdx, setHoldIdx] = useState(0);
-  const [stage, setStage] = useState<"idle" | "inhale" | "hold" | "rest">("idle");
-  const [holdSecondsLeft, setHoldSecondsLeft] = useState(HOLD_SECONDS);
-  const [zone, setZone] = useState<ZoneState>("inZone");
+  const [stage, setStage] = useState<SessionStage>("idle");
+  const [stableSec, setStableSec] = useState(0);
+  const [longestRunSec, setLongestRunSec] = useState(0);
+  const [isStable, setIsStable] = useState(false);
+  const [reachedTargetThisHold, setReachedTargetThisHold] = useState(false);
+
   const holdsRef = useRef<Hold[]>([]);
   const holdStartRef = useRef<number | null>(null);
-  const outOfZoneSinceRef = useRef<number | null>(null);
-  const lastCueRef = useRef<{ t: number; cue: string }>({ t: 0, cue: "" });
-  const onDoneRef = useRef(onDone);
+  const cueRef = useRef(cue);
+  const buzzRef = useRef(buzz);
   useEffect(() => {
-    onDoneRef.current = onDone;
+    cueRef.current = cue;
+  });
+  useEffect(() => {
+    buzzRef.current = buzz;
   });
 
-  // ---- live coaching during hold ---------------------------------------
+  // Per-hold runtime accumulators (refs so the polling loop can mutate without
+  // re-running effects).
+  const stableMsAccumRef = useRef(0);
+  const currentRunStartRef = useRef<number | null>(null);
+  const longestRunMsRef = useRef(0);
+  const driftEventsRef = useRef(0);
+  const firstLockAtRef = useRef<number | null>(null);
+  const candidateStateRef = useRef<{ wantStable: boolean; since: number }>({ wantStable: false, since: 0 });
+  const lastSampleAtRef = useRef<number>(0);
+  const targetCueFiredRef = useRef(false);
+  const releaseCandidateSinceRef = useRef<number | null>(null);
+
+  // Reset state when starting a hold
+  const resetHoldState = useCallback(() => {
+    stableMsAccumRef.current = 0;
+    currentRunStartRef.current = null;
+    longestRunMsRef.current = 0;
+    driftEventsRef.current = 0;
+    firstLockAtRef.current = null;
+    candidateStateRef.current = { wantStable: false, since: 0 };
+    targetCueFiredRef.current = false;
+    releaseCandidateSinceRef.current = null;
+    setStableSec(0);
+    setLongestRunSec(0);
+    setIsStable(false);
+    setReachedTargetThisHold(false);
+  }, []);
+
+  const finishHold = useCallback(
+    (auto: boolean) => {
+      const start = holdStartRef.current ?? performance.now();
+      const totalMs = performance.now() - start;
+      const totalDuration = totalMs / 1000;
+      // Plateau summary from the longest stable run, if any
+      let plateauPitch: number | null = null;
+      let plateauSD: number | null = null;
+      if (longestRunMsRef.current > 1500) {
+        // Approx end of longest run = end of accumulation; we don't track its
+        // boundaries precisely, so use last 3s of the hold trace as a proxy.
+        const summary = summarizeRange(
+          traceRef.current,
+          start + Math.max(0, totalMs - 3000),
+          start + totalMs,
+        );
+        if (summary) {
+          plateauPitch = summary.median;
+          plateauSD = summary.sd;
+        }
+      }
+      const h: Hold = {
+        index: holdIdx + 1,
+        totalDurationSec: totalDuration,
+        stableSec: stableMsAccumRef.current / 1000,
+        longestRunSec: longestRunMsRef.current / 1000,
+        driftEvents: driftEventsRef.current,
+        timeToLockSec:
+          firstLockAtRef.current != null ? (firstLockAtRef.current - start) / 1000 : null,
+        plateauPitch,
+        plateauSD,
+        reachedTarget: longestRunMsRef.current / 1000 >= holdTarget,
+      };
+      holdsRef.current.push(h);
+      cueRef.current("release_breath");
+      buzzRef.current(40);
+      setStage("exhale");
+      setTimeout(() => setStage("between"), 1500);
+      setTimeout(() => {
+        const next = holdIdx + 1;
+        if (next >= holdsPerSession) {
+          cueRef.current("session_done");
+          onComplete(holdsRef.current);
+        } else {
+          setHoldIdx(next);
+          resetHoldState();
+          setStage("idle");
+        }
+      }, 4500);
+      void auto; // currently unused but kept for clarity
+    },
+    [holdIdx, holdTarget, holdsPerSession, onComplete, resetHoldState, traceRef],
+  );
+
+  // Stability detection loop during the hold
   useEffect(() => {
     if (stage !== "hold") return;
     const id = setInterval(() => {
-      const dev = pitchRef.current - plateau.targetPitch;
-      const absDev = Math.abs(dev);
-      const inZone = absDev <= plateau.toleranceDeg;
-
-      // track sustained out-of-zone
       const now = performance.now();
-      if (inZone) {
-        outOfZoneSinceRef.current = null;
-      } else if (outOfZoneSinceRef.current == null) {
-        outOfZoneSinceRef.current = now;
-      }
-      const sustainedMs = outOfZoneSinceRef.current
-        ? now - outOfZoneSinceRef.current
-        : 0;
+      const dt = lastSampleAtRef.current ? now - lastSampleAtRef.current : 0;
+      lastSampleAtRef.current = now;
 
-      let next: ZoneState;
-      if (inZone) next = "inZone";
-      else if (sustainedMs > DRIFT_LIMIT_MS || absDev > plateau.toleranceDeg * 3)
-        next = "wayOff";
-      else if (dev > 0) next = "above";
-      else next = "below";
-      setZone(next);
+      const sd = rollingSD(traceRef.current, STABILITY_WINDOW_MS);
+      const wantStable = sd < STABLE_SD_DEG;
 
-      // speak cues — debounce so we don't jabber
-      const cue = next;
-      const last = lastCueRef.current;
-      const elapsed = now - last.t;
-      const shouldSpeak =
-        (cue !== last.cue && elapsed > 1500) ||
-        (cue === "inZone" && elapsed > REASSURE_INTERVAL_MS) ||
-        (cue === "wayOff" && elapsed > REASSURE_INTERVAL_MS);
-      if (shouldSpeak) {
-        lastCueRef.current = { t: now, cue };
-        const clipKey: PhraseKey =
-          cue === "inZone"
-            ? "practice_in_zone"
-            : cue === "below"
-            ? "practice_below"
-            : cue === "above"
-            ? "practice_above"
-            : "practice_drift";
-        playClip(clipKey);
+      // Debounced state machine
+      const cs = candidateStateRef.current;
+      if (wantStable !== cs.wantStable) {
+        candidateStateRef.current = { wantStable, since: now };
       }
-    }, 400);
+      const heldFor = now - candidateStateRef.current.since;
+      const debounceMs = wantStable ? STABLE_DEBOUNCE_MS : DRIFT_DEBOUNCE_MS;
+      const confirm = heldFor >= debounceMs;
+
+      if (confirm) {
+        if (wantStable && !isStable) {
+          setIsStable(true);
+          if (firstLockAtRef.current == null) firstLockAtRef.current = now;
+          currentRunStartRef.current = now;
+          if (driftEventsRef.current === 0) {
+            cueRef.current("locked_in");
+          } else {
+            cueRef.current("regained");
+          }
+          buzzRef.current(50);
+        } else if (!wantStable && isStable) {
+          setIsStable(false);
+          driftEventsRef.current += 1;
+          // close out the run that just ended
+          if (currentRunStartRef.current != null) {
+            const runMs = now - currentRunStartRef.current;
+            if (runMs > longestRunMsRef.current) {
+              longestRunMsRef.current = runMs;
+              setLongestRunSec(runMs / 1000);
+            }
+            currentRunStartRef.current = null;
+          }
+          cueRef.current("drifting");
+          buzzRef.current([100, 100, 100]);
+        }
+      }
+
+      if (isStable) {
+        stableMsAccumRef.current += dt;
+        setStableSec(stableMsAccumRef.current / 1000);
+        if (currentRunStartRef.current != null) {
+          const runMs = now - currentRunStartRef.current;
+          if (runMs > longestRunMsRef.current) {
+            longestRunMsRef.current = runMs;
+            setLongestRunSec(runMs / 1000);
+          }
+        }
+        // Target reached?
+        if (
+          !targetCueFiredRef.current &&
+          longestRunMsRef.current / 1000 >= holdTarget
+        ) {
+          targetCueFiredRef.current = true;
+          setReachedTargetThisHold(true);
+          cueRef.current("target_reached");
+          buzzRef.current([100, 50, 100, 50, 250]);
+        }
+      }
+
+      // Release auto-detection: pitch returned near baseline for >RELEASE_TIME_MS
+      const dev = Math.abs(pitchRef.current - baseline.meanPitch);
+      const peakDev = Math.max(1, baseline.amplitudeDeg * 2);
+      if (dev < peakDev * RELEASE_PITCH_FRAC) {
+        if (releaseCandidateSinceRef.current == null) {
+          releaseCandidateSinceRef.current = now;
+        } else if (now - releaseCandidateSinceRef.current > RELEASE_TIME_MS) {
+          finishHold(true);
+        }
+      } else {
+        releaseCandidateSinceRef.current = null;
+      }
+    }, 200);
     return () => clearInterval(id);
-  }, [stage, plateau, pitchRef]);
+  }, [stage, baseline, holdTarget, isStable, pitchRef, traceRef, finishHold]);
 
-  const runHold = useCallback(() => {
+  const startHold = () => {
+    resetHoldState();
     setStage("inhale");
-    setZone("inZone");
-    outOfZoneSinceRef.current = null;
-    lastCueRef.current = { t: 0, cue: "" };
-    playClip("practice_inhale");
+    cueRef.current("inhale_cue");
     setTimeout(() => {
       setStage("hold");
-      playClip("practice_hold");
       holdStartRef.current = performance.now();
-      let s = HOLD_SECONDS;
-      setHoldSecondsLeft(s);
-      const tick = setInterval(() => {
-        s -= 1;
-        setHoldSecondsLeft(s);
-        if (s <= 0) {
-          clearInterval(tick);
-          const start = holdStartRef.current ?? performance.now();
-          const samples = traceRef.current.filter((d) => d.t >= start).map((d) => d.p);
-          const inZoneCount = samples.filter(
-            (p) => Math.abs(p - plateau.targetPitch) <= plateau.toleranceDeg,
-          ).length;
-          let peak = baseline.meanPitch;
-          for (const v of samples) {
-            if (Math.abs(v - baseline.meanPitch) > Math.abs(peak - baseline.meanPitch)) {
-              peak = v;
-            }
-          }
-          const mean = samples.length
-            ? samples.reduce((a, b) => a + b, 0) / samples.length
-            : baseline.meanPitch;
-          const inZonePct = samples.length ? (inZoneCount / samples.length) * 100 : 0;
-          holdsRef.current.push({
-            durationSec: HOLD_SECONDS,
-            peakPitch: peak,
-            meanPitchInHold: mean,
-            inZonePct,
-          });
-          playClip("practice_release");
-          setStage("rest");
-          setTimeout(() => {
-            const next = holdIdx + 1;
-            if (next >= PRACTICE_HOLDS) {
-              playClip("practice_done");
-              onDoneRef.current(holdsRef.current);
-            } else {
-              setHoldIdx(next);
-              setStage("idle");
-            }
-          }, 3000);
-        }
-      }, 1000);
-    }, 4500);
-  }, [holdIdx, baseline, plateau, traceRef]);
+      lastSampleAtRef.current = performance.now();
+    }, 4000);
+  };
 
-  // ---- visual during hold: full-screen color + big glanceable cue ------
-  if (stage === "hold") {
-    return (
-      <HoldOverlay
-        zone={zone}
-        secondsLeft={holdSecondsLeft}
-        pitch={pitch}
-        plateau={plateau}
-        holdIdx={holdIdx}
+  // Visual orb phase
+  const orbPhase: OrbPhase =
+    stage === "inhale"
+      ? "inhale"
+      : stage === "hold"
+      ? isStable
+        ? "hold-stable"
+        : "hold-drifting"
+      : stage === "exhale"
+      ? "exhale"
+      : "rest";
+
+  const targetPct = Math.min(100, (longestRunSec / holdTarget) * 100);
+  const stablePct = Math.min(100, (stableSec / holdTarget) * 100);
+
+  return (
+    <div className="relative flex-1 flex flex-col" style={{ overflow: "hidden" }}>
+      {/* Big ambient glow */}
+      <div
+        style={{
+          position: "absolute",
+          top: "20%",
+          left: "50%",
+          transform: "translate(-50%, 0)",
+          width: 480,
+          height: 480,
+          borderRadius: "50%",
+          background: `radial-gradient(circle, ${
+            stage === "hold" && !isStable ? "rgba(217,148,102,0.4)" : P.halo
+          } 0%, transparent 60%)`,
+          filter: "blur(8px)",
+          opacity: stage === "hold" ? 1 : 0.6,
+          transition: "opacity 1s ease, background 0.6s ease",
+          pointerEvents: "none",
+        }}
       />
-    );
-  }
+      <div
+        style={{
+          position: "absolute",
+          top: "50%",
+          left: "50%",
+          transform: "translate(-50%, -50%)",
+          width: 540,
+          height: 540,
+          borderRadius: "50%",
+          background: `radial-gradient(circle, ${P.haloSky} 0%, transparent 60%)`,
+          filter: "blur(8px)",
+          pointerEvents: "none",
+        }}
+      />
 
-  return (
-    <div className="flex-1 flex flex-col gap-4 w-full">
-      <h2 className="text-xl font-semibold">Practice</h2>
-      <p className="text-slate-700 text-sm">
-        Inhale a bit past your target, then ease down into the green zone and hold there.
-        Audio will guide you. The screen will go full color so you can glance at it.
-      </p>
-
-      <Trace canvasRef={canvasRef} pitch={pitch} />
-
-      <div className="rounded-xl bg-slate-100 py-3 px-4 text-center text-sm text-slate-500">
-        Target {fmt(plateau.targetPitch)}° ± {fmt(plateau.toleranceDeg)}°
-      </div>
-
-      <div className="rounded-xl bg-slate-100 p-4 text-center">
-        <div className="text-sm text-slate-500">
-          Hold {Math.min(holdIdx + 1, PRACTICE_HOLDS)} of {PRACTICE_HOLDS}
-        </div>
-        {stage === "idle" && (
-          <button
-            onClick={runHold}
-            className="mt-3 w-full rounded-xl bg-blue-600 hover:bg-blue-700 text-white font-semibold py-3"
+      <Header
+        back={onAbort}
+        right={
+          <div
+            style={{
+              padding: "7px 14px",
+              borderRadius: 999,
+              background: "rgba(255,255,255,0.65)",
+              backdropFilter: "blur(10px)",
+              WebkitBackdropFilter: "blur(10px)",
+              fontSize: 12,
+              color: P.ink,
+              fontWeight: 600,
+              border: `1px solid ${P.hairline}`,
+            }}
           >
-            Start hold {holdIdx + 1}
-          </button>
-        )}
-        {stage === "inhale" && (
-          <div className="mt-3 text-2xl font-semibold text-blue-700">
-            Breathe in… ease down into the zone
+            Hold {holdIdx + 1} of {holdsPerSession}
           </div>
-        )}
-        {stage === "rest" && (
-          <div className="mt-3 text-lg text-slate-700">Release. Breathe.</div>
-        )}
-      </div>
-    </div>
-  );
-}
+        }
+      />
 
-function HoldOverlay({
-  zone,
-  secondsLeft,
-  pitch,
-  plateau,
-  holdIdx,
-}: {
-  zone: ZoneState;
-  secondsLeft: number;
-  pitch: number;
-  plateau: Plateau;
-  holdIdx: number;
-}) {
-  const dev = pitch - plateau.targetPitch;
-  const palette =
-    zone === "inZone"
-      ? "bg-green-500 text-white"
-      : zone === "wayOff"
-      ? "bg-red-600 text-white"
-      : "bg-amber-500 text-white";
-  const word =
-    zone === "inZone"
-      ? "HOLD"
-      : zone === "below"
-      ? "DEEPER ↑"
-      : zone === "above"
-      ? "EASE ↓"
-      : "RELEASE";
-  const sub =
-    zone === "inZone"
-      ? "Stay right here"
-      : zone === "below"
-      ? "Breathe in a little more"
-      : zone === "above"
-      ? "Ease down into the zone"
-      : "Release and try again";
-  return (
-    <div className={`fixed inset-0 z-50 flex flex-col items-center justify-center ${palette} transition-colors`}>
-      <div className="absolute top-4 left-4 text-xs opacity-80">
-        Hold {Math.min(holdIdx + 1, PRACTICE_HOLDS)} of {PRACTICE_HOLDS}
-      </div>
-      <div className="absolute top-4 right-4 text-xl font-mono font-semibold">{secondsLeft}s</div>
-      <div className="text-7xl font-extrabold tracking-tight">{word}</div>
-      <div className="mt-2 text-lg opacity-90">{sub}</div>
-      <div className="mt-8 text-sm font-mono opacity-80">
-        pitch {fmt(pitch)}° · target {fmt(plateau.targetPitch)}° ({dev >= 0 ? "+" : ""}
-        {fmt(dev)}°)
-      </div>
-    </div>
-  );
-}
-
-function Report({
-  baseline,
-  plateau,
-  holds,
-  onRestart,
-}: {
-  baseline: Baseline | null;
-  plateau: Plateau | null;
-  holds: Hold[];
-  onRestart: () => void;
-}) {
-  const meanInZone =
-    holds.length > 0 ? holds.reduce((a, h) => a + h.inZonePct, 0) / holds.length : 0;
-  const meanPeak =
-    holds.length > 0 ? holds.reduce((a, h) => a + h.peakPitch, 0) / holds.length : 0;
-  const peakSd =
-    holds.length > 1
-      ? Math.sqrt(
-          holds.reduce((a, h) => a + (h.peakPitch - meanPeak) ** 2, 0) / holds.length,
-        )
-      : 0;
-
-  return (
-    <div className="flex-1 flex flex-col gap-4 w-full">
-      <h2 className="text-xl font-semibold">Session report</h2>
-
-      <div className="grid grid-cols-2 gap-3">
-        <Stat label="Holds completed" value={String(holds.length)} />
-        <Stat label="Avg time in zone" value={`${fmt(meanInZone, 0)}%`} />
-        <Stat label="Avg peak pitch" value={`${fmt(meanPeak)}°`} />
-        <Stat label="Reproducibility (SD)" value={`±${fmt(peakSd)}°`} />
-      </div>
-
-      {plateau && (
-        <div className="rounded-xl bg-slate-50 p-4 text-sm text-slate-700">
-          <div>
-            Learned target: {fmt(plateau.targetPitch)}° ± {fmt(plateau.toleranceDeg)}°
-          </div>
-          {baseline && (
-            <div>
-              Baseline: {fmt(baseline.meanPitch)}° (amplitude {fmt(baseline.amplitudeDeg)}°)
-            </div>
-          )}
-        </div>
-      )}
-
-      <details className="rounded-xl bg-slate-50 p-4 text-sm">
-        <summary className="font-semibold cursor-pointer">Per-hold detail</summary>
-        <table className="w-full mt-3 text-left">
-          <thead className="text-slate-500">
-            <tr>
-              <th>#</th>
-              <th>Peak</th>
-              <th>Mean</th>
-              <th>In zone</th>
-            </tr>
-          </thead>
-          <tbody>
-            {holds.map((h, i) => (
-              <tr key={i} className="border-t border-slate-200">
-                <td>{i + 1}</td>
-                <td>{fmt(h.peakPitch)}°</td>
-                <td>{fmt(h.meanPitchInHold)}°</td>
-                <td>{fmt(h.inZonePct, 0)}%</td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
-      </details>
-
-      <button
-        onClick={onRestart}
-        className="mt-2 rounded-xl bg-blue-600 hover:bg-blue-700 text-white font-semibold py-3"
+      <div
+        className="relative flex-1 flex flex-col items-center justify-center"
+        style={{ padding: "0 32px", zIndex: 2 }}
       >
-        Practice again
-      </button>
+        <div className="relative" style={{ width: 280, height: 280, display: "flex", alignItems: "center", justifyContent: "center" }}>
+          {/* Progress ring — fills with longest stable run / target */}
+          <svg
+            width="280"
+            height="280"
+            viewBox="0 0 280 280"
+            style={{ position: "absolute", inset: 0, transform: "rotate(-90deg)" }}
+          >
+            <circle
+              cx="140"
+              cy="140"
+              r="130"
+              fill="none"
+              stroke="rgba(255,255,255,0.55)"
+              strokeWidth="3"
+            />
+            <circle
+              cx="140"
+              cy="140"
+              r="130"
+              fill="none"
+              stroke={reachedTargetThisHold ? P.good : P.accentDeep}
+              strokeWidth="4"
+              strokeLinecap="round"
+              strokeDasharray={2 * Math.PI * 130}
+              strokeDashoffset={2 * Math.PI * 130 * (1 - targetPct / 100)}
+              style={{ transition: "stroke-dashoffset 0.2s linear, stroke 0.5s ease" }}
+            />
+          </svg>
+          <Orb
+            phase={orbPhase}
+            size={220}
+            secondsLeft={
+              stage === "hold"
+                ? Math.max(0, Math.ceil(holdTarget - longestRunSec))
+                : null
+            }
+            label={stage === "hold" ? "to target" : undefined}
+          />
+        </div>
+        <div className="mt-8 text-center">
+          <div
+            style={{
+              fontSize: 11,
+              letterSpacing: 3,
+              textTransform: "uppercase",
+              color: P.skyDeep,
+              fontWeight: 700,
+            }}
+          >
+            {stage === "idle"
+              ? "Ready"
+              : stage === "inhale"
+              ? "Breathe in"
+              : stage === "hold"
+              ? isStable
+                ? reachedTargetThisHold
+                  ? "Target reached"
+                  : "Locked in"
+                : "Drifting"
+              : stage === "exhale"
+              ? "Release"
+              : "Rest"}
+          </div>
+          <div
+            style={{
+              fontSize: 36,
+              color: P.ink,
+              fontWeight: 700,
+              marginTop: 4,
+              letterSpacing: -1,
+            }}
+          >
+            {stage === "idle"
+              ? "Hold " + (holdIdx + 1)
+              : stage === "inhale"
+              ? "Deep breath in"
+              : stage === "hold"
+              ? isStable
+                ? "Hold steady"
+                : "Steady…"
+              : stage === "exhale"
+              ? "Breathe out"
+              : "Breathing"}
+          </div>
+        </div>
+      </div>
+
+      {/* Stable time card */}
+      <div style={{ padding: "0 24px 32px", zIndex: 2, position: "relative" }}>
+        <Card className="p-5">
+          <div className="flex items-baseline justify-between">
+            <div className="text-[10px] uppercase tracking-widest font-semibold" style={{ color: P.muted }}>
+              Stable time
+            </div>
+            <div className="text-[10px] uppercase tracking-widest font-semibold" style={{ color: P.muted }}>
+              Target {holdTarget}s
+            </div>
+          </div>
+          <div className="flex items-baseline gap-2 mt-1">
+            <div style={{ fontSize: 36, fontWeight: 700, color: P.ink, letterSpacing: -1, fontVariantNumeric: "tabular-nums" }}>
+              {fmt(longestRunSec, 1)}
+            </div>
+            <div style={{ fontSize: 13, color: P.ink2 }}>s longest run</div>
+          </div>
+          <div className="mt-3 relative" style={{ height: 8, borderRadius: 4, background: P.hairline, overflow: "hidden" }}>
+            <div
+              style={{
+                position: "absolute",
+                left: 0,
+                top: 0,
+                bottom: 0,
+                width: `${stablePct}%`,
+                background: P.sky,
+                opacity: 0.5,
+                transition: "width 0.2s ease",
+              }}
+            />
+            <div
+              style={{
+                position: "absolute",
+                left: 0,
+                top: 0,
+                bottom: 0,
+                width: `${targetPct}%`,
+                background: `linear-gradient(90deg, ${P.accent}, ${P.skyDeep})`,
+                transition: "width 0.2s ease",
+              }}
+            />
+          </div>
+          <div className="mt-2 flex justify-between text-xs" style={{ color: P.muted, fontVariantNumeric: "tabular-nums" }}>
+            <span>{fmt(stableSec, 1)}s total stable</span>
+            <span>
+              tilt {fmt(pitch)}° · drift {driftEventsRef.current}
+            </span>
+          </div>
+          <div className="mt-3">
+            {stage === "idle" && <Btn onClick={startHold}>Start hold {holdIdx + 1}</Btn>}
+            {stage === "hold" && (
+              <Btn variant="ghost" onClick={() => finishHold(false)}>
+                End hold
+              </Btn>
+            )}
+            {(stage === "inhale" || stage === "exhale" || stage === "between") && (
+              <Btn variant="ghost" disabled>
+                {stage === "inhale" ? "Breathe in…" : stage === "exhale" ? "Releasing…" : "Resting…"}
+              </Btn>
+            )}
+          </div>
+        </Card>
+      </div>
     </div>
   );
 }
 
-function Stat({ label, value }: { label: string; value: string }) {
-  return (
-    <div className="rounded-xl bg-slate-50 p-3">
-      <div className="text-xs text-slate-500">{label}</div>
-      <div className="text-2xl font-semibold mt-1">{value}</div>
-    </div>
-  );
-}
-
-function Trace({
-  canvasRef,
-  pitch,
+// ─── Complete ───────────────────────────────────────────────────────────────
+function Complete({
+  holds,
+  holdTarget,
+  onAgain,
+  onDone,
 }: {
-  canvasRef: React.RefObject<HTMLCanvasElement | null>;
-  pitch: number;
+  holds: Hold[];
+  holdTarget: number;
+  onAgain: () => void;
+  onDone: () => void;
 }) {
+  const reached = holds.filter((h) => h.reachedTarget).length;
+  const meanLongest =
+    holds.length > 0 ? holds.reduce((a, h) => a + h.longestRunSec, 0) / holds.length : 0;
+  const totalStable = holds.reduce((a, h) => a + h.stableSec, 0);
+  const meanPlateauPitch = (() => {
+    const pp = holds.map((h) => h.plateauPitch).filter((v): v is number => v != null);
+    return pp.length ? pp.reduce((a, b) => a + b, 0) / pp.length : null;
+  })();
+  const driftTotal = holds.reduce((a, h) => a + h.driftEvents, 0);
+
   return (
-    <div className="rounded-xl bg-white border border-slate-200 overflow-hidden">
-      <canvas ref={canvasRef} className="w-full h-40" />
-      <div className="px-3 py-2 text-xs text-slate-500 border-t border-slate-100 flex justify-between">
-        <span>Pitch (deg)</span>
-        <span className="font-mono">{fmt(pitch)}°</span>
+    <div className="relative flex-1 flex flex-col" style={{ overflow: "hidden" }}>
+      <div
+        style={{
+          position: "absolute",
+          top: "5%",
+          left: "50%",
+          transform: "translateX(-50%)",
+          width: "90%",
+          height: "50%",
+          background: `radial-gradient(circle, ${P.halo}, transparent 60%)`,
+          filter: "blur(20px)",
+          pointerEvents: "none",
+        }}
+      />
+      <Header back={onDone} />
+      <div
+        className="relative flex-1 flex flex-col"
+        style={{ padding: "20px 28px 0", zIndex: 1 }}
+      >
+        <div
+          className="self-center flex items-center justify-center"
+          style={{
+            width: 92,
+            height: 92,
+            borderRadius: 46,
+            background: `linear-gradient(135deg, ${P.accent}, ${P.sky})`,
+            boxShadow: `0 16px 40px ${P.halo}`,
+            marginTop: 8,
+          }}
+        >
+          <svg width="36" height="36" viewBox="0 0 36 36" fill="none">
+            <path
+              d="M9 18l6 6 12-14"
+              stroke="#fff"
+              strokeWidth="2.5"
+              strokeLinecap="round"
+              strokeLinejoin="round"
+            />
+          </svg>
+        </div>
+        <div className="text-center mt-5">
+          <div
+            style={{
+              fontSize: 11,
+              letterSpacing: 3,
+              textTransform: "uppercase",
+              color: P.skyDeep,
+              fontWeight: 700,
+            }}
+          >
+            Beautiful
+          </div>
+          <h2
+            style={{
+              fontSize: 32,
+              lineHeight: 1.1,
+              fontWeight: 700,
+              color: P.ink,
+              margin: "8px 0 0",
+              letterSpacing: -0.8,
+            }}
+          >
+            You did wonderfully today.
+          </h2>
+          <p style={{ fontSize: 14, color: P.ink2, marginTop: 10 }}>
+            {holds.length} hold{holds.length === 1 ? "" : "s"} · {reached} reached the {holdTarget}s target
+          </p>
+        </div>
+
+        <Card className="mt-7 p-5">
+          <div className="flex justify-around">
+            {[
+              [`${fmt(meanLongest, 1)}s`, "avg longest run"],
+              [`${fmt(totalStable, 0)}s`, "total stable"],
+              [meanPlateauPitch != null ? `${fmt(meanPlateauPitch)}°` : "—", "avg plateau"],
+            ].map(([v, k]) => (
+              <div key={k} className="text-center">
+                <div style={{ fontSize: 22, fontWeight: 700, color: P.ink, letterSpacing: -0.5 }}>
+                  {v}
+                </div>
+                <div
+                  style={{
+                    fontSize: 10,
+                    color: P.muted,
+                    marginTop: 4,
+                    letterSpacing: 0.5,
+                    textTransform: "uppercase",
+                    fontWeight: 600,
+                  }}
+                >
+                  {k}
+                </div>
+              </div>
+            ))}
+          </div>
+          <div className="mt-5 pt-5" style={{ borderTop: `1px solid ${P.hairline}` }}>
+            <div
+              style={{
+                fontSize: 11,
+                letterSpacing: 1,
+                textTransform: "uppercase",
+                color: P.muted,
+                fontWeight: 600,
+              }}
+            >
+              Each hold (longest stable run)
+            </div>
+            <div className="mt-3 flex items-end gap-2.5" style={{ height: 60 }}>
+              {holds.map((h, i) => {
+                const pct = Math.min(100, (h.longestRunSec / holdTarget) * 100);
+                return (
+                  <div key={i} className="flex-1 flex flex-col items-center gap-1.5">
+                    <div className="w-full flex items-end" style={{ height: 50 }}>
+                      <div
+                        style={{
+                          width: "100%",
+                          height: `${Math.max(6, pct)}%`,
+                          minHeight: 4,
+                          borderRadius: 6,
+                          background: h.reachedTarget
+                            ? `linear-gradient(180deg, ${P.good}, ${P.sky})`
+                            : `linear-gradient(180deg, ${P.accent}, ${P.sky})`,
+                        }}
+                      />
+                    </div>
+                    <div
+                      style={{
+                        fontSize: 10,
+                        color: P.muted,
+                        fontVariantNumeric: "tabular-nums",
+                      }}
+                    >
+                      {fmt(h.longestRunSec, 0)}s
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          </div>
+        </Card>
+
+        {driftTotal > 0 && (
+          <div
+            className="mt-4 flex items-start gap-2.5"
+            style={{
+              padding: "14px 16px",
+              borderRadius: 18,
+              background: "rgba(168,193,222,0.18)",
+            }}
+          >
+            <div
+              style={{
+                width: 6,
+                height: 6,
+                borderRadius: 3,
+                background: P.skyDeep,
+                marginTop: 7,
+                flexShrink: 0,
+              }}
+            />
+            <div style={{ fontSize: 13, color: P.ink2, lineHeight: 1.45 }}>
+              {driftTotal === 1 ? "One drift moment" : `${driftTotal} drift moments`} across the session.
+              The longer the unbroken run, the closer you get to a clean clinical hold.
+            </div>
+          </div>
+        )}
+      </div>
+      <div className="flex gap-2.5" style={{ padding: "20px 24px 32px", position: "relative", zIndex: 1 }}>
+        <Btn variant="ghost" onClick={onDone} className="flex-1">
+          Done
+        </Btn>
+        <Btn onClick={onAgain} className="flex-1">
+          Practice again
+        </Btn>
       </div>
     </div>
   );

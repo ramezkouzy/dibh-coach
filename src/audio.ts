@@ -13,14 +13,22 @@ export const PHRASES = {
   baseline_odd_rate: "Your breathing looked unusual. Let's try once more.",
   baseline_done: "Baseline captured.",
 
-  // learn
+  // session — stability-based coaching
+  inhale_cue: "Take a deep breath in.",
+  locked_in: "Locked in. Hold steady.",
+  drifting: "Drifting. Hold steady.",
+  regained: "There you go. Keep holding.",
+  target_reached: "Target reached. Great hold.",
+  release_breath: "Release. Breathe normally.",
+  session_done: "Session complete. Great work.",
+
+  // legacy keys retained so existing MP3s still resolve.
+  // Safe to delete after re-recording, but harmless if left.
   learn_inhale: "Take a deep breath in.",
   learn_hold: "Hold it.",
   learn_release_good: "Good hold. Release and breathe.",
   learn_release: "Release. Breathe.",
   learn_complete: "All five holds learned. Get ready to practice.",
-
-  // practice
   practice_inhale: "Take a deep breath in, then ease down into the green zone.",
   practice_hold: "Hold it.",
   practice_in_zone: "Hold. Steady.",
