@@ -151,6 +151,36 @@ export default function LabPage() {
   const lastDispRef = useRef(0);
   const lastSampleAtRef = useRef(0);
 
+  // ---- wake lock so the phone doesn't sleep during a recording ----------
+  useEffect(() => {
+    if (!granted) return;
+    let lock: WakeLockSentinel | null = null;
+    let cancelled = false;
+    const acquire = async () => {
+      try {
+        const nav = navigator as Navigator & {
+          wakeLock?: { request: (type: "screen") => Promise<WakeLockSentinel> };
+        };
+        if (nav.wakeLock) {
+          lock = await nav.wakeLock.request("screen");
+          if (cancelled && lock) lock.release();
+        }
+      } catch {
+        // best-effort
+      }
+    };
+    acquire();
+    const onVisible = () => {
+      if (document.visibilityState === "visible") acquire();
+    };
+    document.addEventListener("visibilitychange", onVisible);
+    return () => {
+      cancelled = true;
+      document.removeEventListener("visibilitychange", onVisible);
+      lock?.release();
+    };
+  }, [granted]);
+
   // ---- sensor wiring ------------------------------------------------------
   useEffect(() => {
     if (!granted) return;
