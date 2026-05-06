@@ -1,65 +1,773 @@
-import Image from "next/image";
+"use client";
 
-export default function Home() {
+import { useEffect, useRef, useState, useCallback } from "react";
+
+type Phase = "intro" | "calibrate" | "learn" | "practice" | "report";
+
+type Hold = {
+  durationSec: number;
+  peakPitch: number;
+  meanPitchInHold: number;
+  inZonePct: number;
+};
+
+type Baseline = {
+  meanPitch: number;
+  amplitudeDeg: number;
+};
+
+type Plateau = {
+  targetPitch: number;
+  toleranceDeg: number;
+  peaks: number[];
+};
+
+const HOLD_SECONDS = 10;
+const PRACTICE_HOLDS = 5;
+const LEARN_HOLDS = 5;
+const CALIBRATE_SECONDS = 20;
+
+function speak(text: string) {
+  if (typeof window === "undefined" || !window.speechSynthesis) return;
+  window.speechSynthesis.cancel();
+  const u = new SpeechSynthesisUtterance(text);
+  u.rate = 0.95;
+  u.pitch = 1;
+  window.speechSynthesis.speak(u);
+}
+
+function fmt(n: number, digits = 1) {
+  return n.toFixed(digits);
+}
+
+export default function Page() {
+  const [phase, setPhase] = useState<Phase>("intro");
+  const [pitch, setPitch] = useState(0);
+  const [permissionError, setPermissionError] = useState<string | null>(null);
+
+  const pitchRef = useRef(0);
+  const traceRef = useRef<{ t: number; p: number }[]>([]);
+  const canvasRef = useRef<HTMLCanvasElement | null>(null);
+
+  const [baseline, setBaseline] = useState<Baseline | null>(null);
+  const [plateau, setPlateau] = useState<Plateau | null>(null);
+  const [holds, setHolds] = useState<Hold[]>([]);
+
+  // ---- sensor wiring -----------------------------------------------------
+  useEffect(() => {
+    if (phase === "intro") return;
+    const handler = (e: DeviceOrientationEvent) => {
+      // beta = rotation around X (pitch). When phone lies flat on belly screen-up,
+      // beta sits near 0 and changes as the belly rises and falls.
+      if (e.beta == null) return;
+      const alpha = 0.3;
+      const next = pitchRef.current * (1 - alpha) + e.beta * alpha;
+      pitchRef.current = next;
+      setPitch(next);
+      traceRef.current.push({ t: performance.now(), p: next });
+      const cutoff = performance.now() - 30_000;
+      while (traceRef.current.length && traceRef.current[0].t < cutoff) {
+        traceRef.current.shift();
+      }
+    };
+    window.addEventListener("deviceorientation", handler);
+    return () => window.removeEventListener("deviceorientation", handler);
+  }, [phase]);
+
+  // ---- live trace render -------------------------------------------------
+  useEffect(() => {
+    if (phase === "intro" || phase === "report") return;
+    let raf = 0;
+    const draw = () => {
+      const canvas = canvasRef.current;
+      if (canvas) {
+        const dpr = window.devicePixelRatio || 1;
+        const w = canvas.clientWidth;
+        const h = canvas.clientHeight;
+        if (canvas.width !== w * dpr) {
+          canvas.width = w * dpr;
+          canvas.height = h * dpr;
+        }
+        const ctx = canvas.getContext("2d");
+        if (ctx) {
+          ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+          ctx.clearRect(0, 0, w, h);
+          const data = traceRef.current;
+          if (data.length > 1) {
+            let min = Infinity, max = -Infinity;
+            for (const d of data) {
+              if (d.p < min) min = d.p;
+              if (d.p > max) max = d.p;
+            }
+            if (plateau) {
+              min = Math.min(min, plateau.targetPitch - plateau.toleranceDeg * 2);
+              max = Math.max(max, plateau.targetPitch + plateau.toleranceDeg * 2);
+            }
+            if (max - min < 4) {
+              const mid = (min + max) / 2;
+              min = mid - 2;
+              max = mid + 2;
+            }
+            const range = max - min;
+            const t0 = data[0].t;
+            const tN = data[data.length - 1].t;
+            const tRange = Math.max(1, tN - t0);
+            const yOf = (p: number) => h - ((p - min) / range) * h;
+            const xOf = (t: number) => ((t - t0) / tRange) * w;
+
+            if (plateau) {
+              const yTop = yOf(plateau.targetPitch + plateau.toleranceDeg);
+              const yBot = yOf(plateau.targetPitch - plateau.toleranceDeg);
+              ctx.fillStyle = "rgba(34,197,94,0.18)";
+              ctx.fillRect(0, yTop, w, yBot - yTop);
+              ctx.strokeStyle = "rgba(34,197,94,0.6)";
+              ctx.lineWidth = 1;
+              const yMid = yOf(plateau.targetPitch);
+              ctx.setLineDash([4, 4]);
+              ctx.beginPath();
+              ctx.moveTo(0, yMid);
+              ctx.lineTo(w, yMid);
+              ctx.stroke();
+              ctx.setLineDash([]);
+            }
+
+            if (baseline) {
+              ctx.strokeStyle = "rgba(148,163,184,0.4)";
+              ctx.beginPath();
+              const yB = yOf(baseline.meanPitch);
+              ctx.moveTo(0, yB);
+              ctx.lineTo(w, yB);
+              ctx.stroke();
+            }
+
+            ctx.strokeStyle = "#2563eb";
+            ctx.lineWidth = 2;
+            ctx.beginPath();
+            for (let i = 0; i < data.length; i++) {
+              const x = xOf(data[i].t);
+              const y = yOf(data[i].p);
+              if (i === 0) ctx.moveTo(x, y);
+              else ctx.lineTo(x, y);
+            }
+            ctx.stroke();
+          }
+        }
+      }
+      raf = requestAnimationFrame(draw);
+    };
+    raf = requestAnimationFrame(draw);
+    return () => cancelAnimationFrame(raf);
+  }, [phase, baseline, plateau]);
+
+  // ---- permission flow ---------------------------------------------------
+  const requestPermission = useCallback(async () => {
+    setPermissionError(null);
+    const Doc = (typeof DeviceOrientationEvent !== "undefined" ? DeviceOrientationEvent : null) as
+      | (typeof DeviceOrientationEvent & { requestPermission?: () => Promise<"granted" | "denied"> })
+      | null;
+    if (Doc && typeof Doc.requestPermission === "function") {
+      try {
+        const result = await Doc.requestPermission();
+        if (result !== "granted") {
+          setPermissionError("Motion access denied. Reload and tap Allow when prompted.");
+          return;
+        }
+      } catch {
+        setPermissionError("Could not request motion permission. Try again on a real phone.");
+        return;
+      }
+    }
+    if (typeof window !== "undefined" && !("DeviceOrientationEvent" in window)) {
+      setPermissionError("This device does not expose motion sensors.");
+      return;
+    }
+    traceRef.current = [];
+    setPhase("calibrate");
+  }, []);
+
   return (
-    <div className="flex flex-col flex-1 items-center justify-center bg-zinc-50 font-sans dark:bg-black">
-      <main className="flex flex-1 w-full max-w-3xl flex-col items-center justify-between py-32 px-16 bg-white dark:bg-black sm:items-start">
-        <Image
-          className="dark:invert"
-          src="/next.svg"
-          alt="Next.js logo"
-          width={100}
-          height={20}
-          priority
+    <main className="flex-1 flex flex-col items-center px-4 py-6 max-w-md mx-auto w-full">
+      <Header phase={phase} />
+
+      {phase === "intro" && (
+        <Intro onStart={requestPermission} permissionError={permissionError} />
+      )}
+
+      {phase === "calibrate" && (
+        <CalibratePhase
+          pitch={pitch}
+          canvasRef={canvasRef}
+          traceRef={traceRef}
+          onDone={(b) => {
+            setBaseline(b);
+            traceRef.current = [];
+            setPhase("learn");
+          }}
         />
-        <div className="flex flex-col items-center gap-6 text-center sm:items-start sm:text-left">
-          <h1 className="max-w-xs text-3xl font-semibold leading-10 tracking-tight text-black dark:text-zinc-50">
-            To get started, edit the page.tsx file.
-          </h1>
-          <p className="max-w-md text-lg leading-8 text-zinc-600 dark:text-zinc-400">
-            Looking for a starting point or more instructions? Head over to{" "}
-            <a
-              href="https://vercel.com/templates?framework=next.js&utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-              className="font-medium text-zinc-950 dark:text-zinc-50"
-            >
-              Templates
-            </a>{" "}
-            or the{" "}
-            <a
-              href="https://nextjs.org/learn?utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-              className="font-medium text-zinc-950 dark:text-zinc-50"
-            >
-              Learning
-            </a>{" "}
-            center.
-          </p>
+      )}
+
+      {phase === "learn" && baseline && (
+        <LearnPhase
+          pitch={pitch}
+          baseline={baseline}
+          canvasRef={canvasRef}
+          traceRef={traceRef}
+          pitchRef={pitchRef}
+          onDone={(p) => {
+            setPlateau(p);
+            traceRef.current = [];
+            setPhase("practice");
+          }}
+        />
+      )}
+
+      {phase === "practice" && baseline && plateau && (
+        <PracticePhase
+          pitch={pitch}
+          baseline={baseline}
+          plateau={plateau}
+          canvasRef={canvasRef}
+          traceRef={traceRef}
+          pitchRef={pitchRef}
+          onDone={(h) => {
+            setHolds(h);
+            setPhase("report");
+          }}
+        />
+      )}
+
+      {phase === "report" && (
+        <Report
+          baseline={baseline}
+          plateau={plateau}
+          holds={holds}
+          onRestart={() => {
+            setBaseline(null);
+            setPlateau(null);
+            setHolds([]);
+            traceRef.current = [];
+            setPhase("intro");
+          }}
+        />
+      )}
+    </main>
+  );
+}
+
+function Header({ phase }: { phase: Phase }) {
+  const stepNum =
+    phase === "calibrate" ? 1 : phase === "learn" ? 2 : phase === "practice" ? 3 : null;
+  return (
+    <header className="w-full mb-4">
+      <div className="flex items-center justify-between">
+        <h1 className="text-lg font-semibold tracking-tight">DIBH Coach</h1>
+        {stepNum && <span className="text-xs text-slate-500">Step {stepNum} of 3</span>}
+      </div>
+    </header>
+  );
+}
+
+function Intro({
+  onStart,
+  permissionError,
+}: {
+  onStart: () => void;
+  permissionError: string | null;
+}) {
+  return (
+    <div className="flex-1 flex flex-col gap-4 w-full">
+      <div className="rounded-2xl bg-blue-50 p-5">
+        <h2 className="text-2xl font-semibold mb-2">Practice your breath-hold at home</h2>
+        <p className="text-slate-700">
+          A short, three-step session that helps you reproduce the same deep-inspiration
+          breath-hold you do at the simulator. Built for left-sided breast radiation patients.
+        </p>
+      </div>
+
+      <ol className="space-y-3 text-slate-700">
+        <li className="flex gap-3">
+          <span className="font-mono text-blue-600 font-semibold">1.</span>
+          <span>
+            Lie flat on your back. Place this phone <strong>screen-up on your belly</strong>, on
+            the dot your doctor drew.
+          </span>
+        </li>
+        <li className="flex gap-3">
+          <span className="font-mono text-blue-600 font-semibold">2.</span>
+          <span>We&apos;ll record a baseline, then learn your breath-hold.</span>
+        </li>
+        <li className="flex gap-3">
+          <span className="font-mono text-blue-600 font-semibold">3.</span>
+          <span>You&apos;ll practice 5 holds with live coaching.</span>
+        </li>
+      </ol>
+
+      <button
+        onClick={onStart}
+        className="mt-2 w-full rounded-xl bg-blue-600 hover:bg-blue-700 text-white font-semibold py-4 text-lg active:scale-[0.99] transition"
+      >
+        Enable motion sensors & start
+      </button>
+      {permissionError && <p className="text-sm text-red-600">{permissionError}</p>}
+      <p className="text-xs text-slate-500 leading-relaxed mt-2">
+        This is a practice tool, not a medical device. It does not replace any instruction
+        from your radiation oncology team.
+      </p>
+    </div>
+  );
+}
+
+function CalibratePhase({
+  pitch,
+  canvasRef,
+  traceRef,
+  onDone,
+}: {
+  pitch: number;
+  canvasRef: React.RefObject<HTMLCanvasElement | null>;
+  traceRef: React.RefObject<{ t: number; p: number }[]>;
+  onDone: (b: Baseline) => void;
+}) {
+  const [running, setRunning] = useState(false);
+  const [secondsLeft, setSecondsLeft] = useState(CALIBRATE_SECONDS);
+  const startedAtRef = useRef<number | null>(null);
+
+  useEffect(() => {
+    if (!running) return;
+    const id = setInterval(() => {
+      setSecondsLeft((s) => {
+        if (s <= 1) {
+          clearInterval(id);
+          const start = startedAtRef.current ?? performance.now() - CALIBRATE_SECONDS * 1000;
+          const samples = traceRef.current.filter((d) => d.t >= start).map((d) => d.p);
+          if (samples.length < 10) {
+            setRunning(false);
+            speak("We did not capture enough data. Please try again.");
+            return CALIBRATE_SECONDS;
+          }
+          const mean = samples.reduce((a, b) => a + b, 0) / samples.length;
+          const min = Math.min(...samples);
+          const max = Math.max(...samples);
+          speak("Baseline captured.");
+          onDone({ meanPitch: mean, amplitudeDeg: max - min });
+          return 0;
+        }
+        return s - 1;
+      });
+    }, 1000);
+    return () => clearInterval(id);
+  }, [running, onDone, traceRef]);
+
+  return (
+    <div className="flex-1 flex flex-col gap-4 w-full">
+      <h2 className="text-xl font-semibold">Baseline</h2>
+      <p className="text-slate-700">
+        Lie flat. Phone screen-up on your belly at the dot. Breathe normally — no holds —
+        for {CALIBRATE_SECONDS} seconds.
+      </p>
+
+      <Trace canvasRef={canvasRef} pitch={pitch} />
+
+      {!running ? (
+        <button
+          onClick={() => {
+            traceRef.current = [];
+            startedAtRef.current = performance.now();
+            setRunning(true);
+            speak(`Breathe normally for ${CALIBRATE_SECONDS} seconds.`);
+          }}
+          className="rounded-xl bg-blue-600 hover:bg-blue-700 text-white font-semibold py-4 text-lg"
+        >
+          Start baseline ({CALIBRATE_SECONDS}s)
+        </button>
+      ) : (
+        <div className="rounded-xl bg-slate-100 py-4 text-center">
+          <div className="text-4xl font-mono font-semibold text-slate-800">{secondsLeft}s</div>
+          <div className="text-sm text-slate-500 mt-1">Keep breathing normally…</div>
         </div>
-        <div className="flex flex-col gap-4 text-base font-medium sm:flex-row">
-          <a
-            className="flex h-12 w-full items-center justify-center gap-2 rounded-full bg-foreground px-5 text-background transition-colors hover:bg-[#383838] dark:hover:bg-[#ccc] md:w-[158px]"
-            href="https://vercel.com/new?utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-            target="_blank"
-            rel="noopener noreferrer"
-          >
-            <Image
-              className="dark:invert"
-              src="/vercel.svg"
-              alt="Vercel logomark"
-              width={16}
-              height={16}
-            />
-            Deploy Now
-          </a>
-          <a
-            className="flex h-12 w-full items-center justify-center rounded-full border border-solid border-black/[.08] px-5 transition-colors hover:border-transparent hover:bg-black/[.04] dark:border-white/[.145] dark:hover:bg-[#1a1a1a] md:w-[158px]"
-            href="https://nextjs.org/docs?utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-            target="_blank"
-            rel="noopener noreferrer"
-          >
-            Documentation
-          </a>
+      )}
+    </div>
+  );
+}
+
+function LearnPhase({
+  pitch,
+  baseline,
+  canvasRef,
+  traceRef,
+  pitchRef,
+  onDone,
+}: {
+  pitch: number;
+  baseline: Baseline;
+  canvasRef: React.RefObject<HTMLCanvasElement | null>;
+  traceRef: React.RefObject<{ t: number; p: number }[]>;
+  pitchRef: React.RefObject<number>;
+  onDone: (p: Plateau) => void;
+}) {
+  const [holdIdx, setHoldIdx] = useState(0);
+  const [stage, setStage] = useState<"idle" | "inhale" | "hold" | "rest">("idle");
+  const [holdSecondsLeft, setHoldSecondsLeft] = useState(HOLD_SECONDS);
+  const peaksRef = useRef<number[]>([]);
+  const holdStartRef = useRef<number | null>(null);
+
+  const runHold = useCallback(() => {
+    setStage("inhale");
+    speak("Take a deep breath in.");
+    setTimeout(() => {
+      setStage("hold");
+      speak("Hold it.");
+      holdStartRef.current = performance.now();
+      let s = HOLD_SECONDS;
+      setHoldSecondsLeft(s);
+      const tick = setInterval(() => {
+        s -= 1;
+        setHoldSecondsLeft(s);
+        if (s <= 0) {
+          clearInterval(tick);
+          const start = holdStartRef.current ?? performance.now();
+          const samples = traceRef.current
+            .filter((d) => d.t >= start)
+            .map((d) => d.p - baseline.meanPitch);
+          let peak = 0;
+          if (samples.length) {
+            for (const v of samples) {
+              if (Math.abs(v) > Math.abs(peak)) peak = v;
+            }
+          } else {
+            peak = pitchRef.current - baseline.meanPitch;
+          }
+          peaksRef.current.push(peak);
+          speak("And release. Breathe normally.");
+          setStage("rest");
+          setTimeout(() => {
+            const next = holdIdx + 1;
+            if (next >= LEARN_HOLDS) {
+              const peaks = peaksRef.current;
+              const mean = peaks.reduce((a, b) => a + b, 0) / peaks.length;
+              const variance =
+                peaks.reduce((a, b) => a + (b - mean) ** 2, 0) / peaks.length;
+              const sd = Math.sqrt(variance);
+              const tolerance = Math.max(1, sd * 1.5);
+              speak("All five holds learned. Get ready to practice.");
+              onDone({
+                targetPitch: baseline.meanPitch + mean,
+                toleranceDeg: tolerance,
+                peaks: peaks.map((p) => baseline.meanPitch + p),
+              });
+            } else {
+              setHoldIdx(next);
+              setStage("idle");
+            }
+          }, 3000);
+        }
+      }, 1000);
+    }, 4000);
+  }, [holdIdx, baseline, traceRef, pitchRef, onDone]);
+
+  return (
+    <div className="flex-1 flex flex-col gap-4 w-full">
+      <h2 className="text-xl font-semibold">Learn your breath-hold</h2>
+      <p className="text-slate-700">
+        Five holds. We&apos;ll cue you. Take a deep breath in, hold it for {HOLD_SECONDS} seconds,
+        then release. Phone stays flat on your belly.
+      </p>
+
+      <Trace canvasRef={canvasRef} pitch={pitch} />
+
+      <div className="rounded-xl bg-slate-100 p-4 text-center">
+        <div className="text-sm text-slate-500">
+          Hold {Math.min(holdIdx + 1, LEARN_HOLDS)} of {LEARN_HOLDS}
         </div>
-      </main>
+        {stage === "idle" && (
+          <button
+            onClick={runHold}
+            className="mt-3 w-full rounded-xl bg-blue-600 hover:bg-blue-700 text-white font-semibold py-3"
+          >
+            Start hold {holdIdx + 1}
+          </button>
+        )}
+        {stage === "inhale" && (
+          <div className="mt-3 text-2xl font-semibold text-blue-700">Breathe in…</div>
+        )}
+        {stage === "hold" && (
+          <div className="mt-3">
+            <div className="text-3xl font-mono font-semibold text-blue-700">{holdSecondsLeft}s</div>
+            <div className="text-sm text-slate-500">Hold it</div>
+          </div>
+        )}
+        {stage === "rest" && (
+          <div className="mt-3 text-lg text-slate-700">Release. Breathe.</div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+function PracticePhase({
+  pitch,
+  baseline,
+  plateau,
+  canvasRef,
+  traceRef,
+  pitchRef,
+  onDone,
+}: {
+  pitch: number;
+  baseline: Baseline;
+  plateau: Plateau;
+  canvasRef: React.RefObject<HTMLCanvasElement | null>;
+  traceRef: React.RefObject<{ t: number; p: number }[]>;
+  pitchRef: React.RefObject<number>;
+  onDone: (h: Hold[]) => void;
+}) {
+  const [holdIdx, setHoldIdx] = useState(0);
+  const [stage, setStage] = useState<"idle" | "inhale" | "hold" | "rest">("idle");
+  const [holdSecondsLeft, setHoldSecondsLeft] = useState(HOLD_SECONDS);
+  const holdsRef = useRef<Hold[]>([]);
+  const holdStartRef = useRef<number | null>(null);
+  const lastCueRef = useRef<{ t: number; cue: string }>({ t: 0, cue: "" });
+
+  useEffect(() => {
+    if (stage !== "hold") return;
+    const id = setInterval(() => {
+      const dev = pitchRef.current - plateau.targetPitch;
+      const absDev = Math.abs(dev);
+      let cue = "";
+      if (absDev <= plateau.toleranceDeg) cue = "good";
+      else if (dev > 0) cue = "ease";
+      else cue = "deeper";
+      const now = performance.now();
+      if (cue !== lastCueRef.current.cue && now - lastCueRef.current.t > 1500) {
+        lastCueRef.current = { t: now, cue };
+        if (cue === "good") speak("Right there. Stay there.");
+        else if (cue === "ease") speak("Ease back a touch.");
+        else speak("Just a little deeper.");
+      }
+    }, 600);
+    return () => clearInterval(id);
+  }, [stage, plateau, pitchRef]);
+
+  const runHold = useCallback(() => {
+    setStage("inhale");
+    speak("Deep breath in.");
+    setTimeout(() => {
+      setStage("hold");
+      speak("Hold it. Find your zone.");
+      holdStartRef.current = performance.now();
+      let s = HOLD_SECONDS;
+      setHoldSecondsLeft(s);
+      const tick = setInterval(() => {
+        s -= 1;
+        setHoldSecondsLeft(s);
+        if (s <= 0) {
+          clearInterval(tick);
+          const start = holdStartRef.current ?? performance.now();
+          const samples = traceRef.current.filter((d) => d.t >= start).map((d) => d.p);
+          const inZone = samples.filter(
+            (p) => Math.abs(p - plateau.targetPitch) <= plateau.toleranceDeg,
+          ).length;
+          let peak = baseline.meanPitch;
+          for (const v of samples) {
+            if (Math.abs(v - baseline.meanPitch) > Math.abs(peak - baseline.meanPitch)) {
+              peak = v;
+            }
+          }
+          const mean = samples.length
+            ? samples.reduce((a, b) => a + b, 0) / samples.length
+            : baseline.meanPitch;
+          const inZonePct = samples.length ? (inZone / samples.length) * 100 : 0;
+          holdsRef.current.push({
+            durationSec: HOLD_SECONDS,
+            peakPitch: peak,
+            meanPitchInHold: mean,
+            inZonePct,
+          });
+          speak("Release. Breathe out.");
+          setStage("rest");
+          setTimeout(() => {
+            const next = holdIdx + 1;
+            if (next >= PRACTICE_HOLDS) {
+              speak("Session complete. Great work.");
+              onDone(holdsRef.current);
+            } else {
+              setHoldIdx(next);
+              setStage("idle");
+            }
+          }, 3000);
+        }
+      }, 1000);
+    }, 4000);
+  }, [holdIdx, baseline, plateau, traceRef, onDone]);
+
+  const dev = pitch - plateau.targetPitch;
+  const inZone = Math.abs(dev) <= plateau.toleranceDeg;
+
+  return (
+    <div className="flex-1 flex flex-col gap-4 w-full">
+      <h2 className="text-xl font-semibold">Practice</h2>
+      <p className="text-slate-700 text-sm">
+        Reproduce the same hold. Stay inside the green band. Listen for cues.
+      </p>
+
+      <Trace canvasRef={canvasRef} pitch={pitch} />
+
+      <div
+        className={`rounded-xl py-3 px-4 text-center transition-colors ${
+          stage === "hold"
+            ? inZone
+              ? "bg-green-100 text-green-900"
+              : "bg-amber-100 text-amber-900"
+            : "bg-slate-100 text-slate-700"
+        }`}
+      >
+        {stage === "hold" ? (
+          inZone ? (
+            <span className="font-semibold">In the zone</span>
+          ) : dev > 0 ? (
+            <span className="font-semibold">Ease back a touch</span>
+          ) : (
+            <span className="font-semibold">A little deeper</span>
+          )
+        ) : (
+          <span className="text-sm text-slate-500">
+            Target {fmt(plateau.targetPitch)}° ± {fmt(plateau.toleranceDeg)}°
+          </span>
+        )}
+      </div>
+
+      <div className="rounded-xl bg-slate-100 p-4 text-center">
+        <div className="text-sm text-slate-500">
+          Hold {Math.min(holdIdx + 1, PRACTICE_HOLDS)} of {PRACTICE_HOLDS}
+        </div>
+        {stage === "idle" && (
+          <button
+            onClick={runHold}
+            className="mt-3 w-full rounded-xl bg-blue-600 hover:bg-blue-700 text-white font-semibold py-3"
+          >
+            Start hold {holdIdx + 1}
+          </button>
+        )}
+        {stage === "inhale" && (
+          <div className="mt-3 text-2xl font-semibold text-blue-700">Breathe in…</div>
+        )}
+        {stage === "hold" && (
+          <div className="mt-3">
+            <div className="text-3xl font-mono font-semibold text-blue-700">{holdSecondsLeft}s</div>
+            <div className="text-sm text-slate-500">Hold it</div>
+          </div>
+        )}
+        {stage === "rest" && (
+          <div className="mt-3 text-lg text-slate-700">Release. Breathe.</div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+function Report({
+  baseline,
+  plateau,
+  holds,
+  onRestart,
+}: {
+  baseline: Baseline | null;
+  plateau: Plateau | null;
+  holds: Hold[];
+  onRestart: () => void;
+}) {
+  const meanInZone =
+    holds.length > 0 ? holds.reduce((a, h) => a + h.inZonePct, 0) / holds.length : 0;
+  const meanPeak =
+    holds.length > 0 ? holds.reduce((a, h) => a + h.peakPitch, 0) / holds.length : 0;
+  const peakSd =
+    holds.length > 1
+      ? Math.sqrt(
+          holds.reduce((a, h) => a + (h.peakPitch - meanPeak) ** 2, 0) / holds.length,
+        )
+      : 0;
+
+  return (
+    <div className="flex-1 flex flex-col gap-4 w-full">
+      <h2 className="text-xl font-semibold">Session report</h2>
+
+      <div className="grid grid-cols-2 gap-3">
+        <Stat label="Holds completed" value={String(holds.length)} />
+        <Stat label="Avg time in zone" value={`${fmt(meanInZone, 0)}%`} />
+        <Stat label="Avg peak pitch" value={`${fmt(meanPeak)}°`} />
+        <Stat label="Reproducibility (SD)" value={`±${fmt(peakSd)}°`} />
+      </div>
+
+      {plateau && (
+        <div className="rounded-xl bg-slate-50 p-4 text-sm text-slate-700">
+          <div>
+            Learned target: {fmt(plateau.targetPitch)}° ± {fmt(plateau.toleranceDeg)}°
+          </div>
+          {baseline && (
+            <div>
+              Baseline: {fmt(baseline.meanPitch)}° (amplitude {fmt(baseline.amplitudeDeg)}°)
+            </div>
+          )}
+        </div>
+      )}
+
+      <details className="rounded-xl bg-slate-50 p-4 text-sm">
+        <summary className="font-semibold cursor-pointer">Per-hold detail</summary>
+        <table className="w-full mt-3 text-left">
+          <thead className="text-slate-500">
+            <tr>
+              <th>#</th>
+              <th>Peak</th>
+              <th>Mean</th>
+              <th>In zone</th>
+            </tr>
+          </thead>
+          <tbody>
+            {holds.map((h, i) => (
+              <tr key={i} className="border-t border-slate-200">
+                <td>{i + 1}</td>
+                <td>{fmt(h.peakPitch)}°</td>
+                <td>{fmt(h.meanPitchInHold)}°</td>
+                <td>{fmt(h.inZonePct, 0)}%</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </details>
+
+      <button
+        onClick={onRestart}
+        className="mt-2 rounded-xl bg-blue-600 hover:bg-blue-700 text-white font-semibold py-3"
+      >
+        Practice again
+      </button>
+    </div>
+  );
+}
+
+function Stat({ label, value }: { label: string; value: string }) {
+  return (
+    <div className="rounded-xl bg-slate-50 p-3">
+      <div className="text-xs text-slate-500">{label}</div>
+      <div className="text-2xl font-semibold mt-1">{value}</div>
+    </div>
+  );
+}
+
+function Trace({
+  canvasRef,
+  pitch,
+}: {
+  canvasRef: React.RefObject<HTMLCanvasElement | null>;
+  pitch: number;
+}) {
+  return (
+    <div className="rounded-xl bg-white border border-slate-200 overflow-hidden">
+      <canvas ref={canvasRef} className="w-full h-40" />
+      <div className="px-3 py-2 text-xs text-slate-500 border-t border-slate-100 flex justify-between">
+        <span>Pitch (deg)</span>
+        <span className="font-mono">{fmt(pitch)}°</span>
+      </div>
     </div>
   );
 }
