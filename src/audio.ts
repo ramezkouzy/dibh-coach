@@ -55,6 +55,7 @@ export type PhraseKey = keyof typeof PHRASES;
 let cache: Partial<Record<PhraseKey, HTMLAudioElement>> = {};
 let currentlyPlaying: HTMLAudioElement | null = null;
 let unlocked = false;
+let playGeneration = 0;
 
 // iOS requires audio to be triggered inside a user gesture once before
 // programmatic playback works. Call this from a click handler before the
@@ -83,6 +84,10 @@ function fallbackSpeak(text: string) {
 
 export function playClip(key: PhraseKey) {
   if (typeof window === "undefined") return;
+  const generation = ++playGeneration;
+  if (window.speechSynthesis) {
+    window.speechSynthesis.cancel();
+  }
   // stop any playing clip
   if (currentlyPlaying) {
     try {
@@ -102,8 +107,12 @@ export function playClip(key: PhraseKey) {
   audio.currentTime = 0;
   const p = audio.play();
   if (p && typeof p.catch === "function") {
-    p.catch(() => {
-      // File missing or autoplay blocked — fall back to Web Speech.
+    p.catch((error) => {
+      // Pausing an in-flight clip because a newer cue arrived rejects its
+      // play() promise in Safari/Chrome. That is intentional interruption,
+      // not a missing file, so do not speak the old phrase over the new one.
+      if (generation !== playGeneration || error?.name === "AbortError") return;
+      // File missing or autoplay blocked for the current cue — fall back to Web Speech.
       fallbackSpeak(PHRASES[key]);
     });
   }
