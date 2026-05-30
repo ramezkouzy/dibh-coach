@@ -7,6 +7,7 @@
     "build": "next build",
     "start": "next start",
     "replay:check": "node scripts/replay-check.mjs",
+    "session:analyze": "node scripts/analyze-session.mjs",
     "tts:generate": "node scripts/generate-tts.mjs"
   },
   "dependencies": {

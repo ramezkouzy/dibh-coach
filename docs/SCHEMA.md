@@ -104,3 +104,113 @@ budget.
 `schema: "dibh-lab/v2"` key. v1 files are auto-promoted by mapping `p`
 to `beta` in the in-memory representation, so the same per-channel and
 per-phase reports work uniformly across both.
+
+---
+
+## Session export: `dibh-session/v1`
+
+The coaching app's Complete screen exports the self-test payload. This is
+the primary feedback handoff for prototype recalibration.
+
+```json
+{
+  "schema": "dibh-session/v1",
+  "app": "DIBH Coach",
+  "exportedAt": "2026-05-30T19:37:49.162Z",
+  "startedAt": "2026-05-30T19:34:16.303Z",
+  "ua": "Mozilla/5.0 ...",
+  "settings": {
+    "holdTarget": 20,
+    "holdsPerSession": 3,
+    "voiceOn": true,
+    "hapticsOn": true,
+    "debugOn": true
+  },
+  "baseline": {
+    "meanPitch": -0.42,
+    "amplitudeDeg": 2.73,
+    "breathingSD": 0.68
+  },
+  "plateau": {
+    "targetPitch": -6.48,
+    "toleranceDeg": 1.82,
+    "calibrationHolds": [
+      {"plateauPitch": -7.22, "plateauSD": 0.21}
+    ]
+  },
+  "holds": [
+    {
+      "index": 1,
+      "totalDurationSec": 20.1,
+      "stableSec": 16.2,
+      "longestRunSec": 11.4,
+      "driftEvents": 1,
+      "timeToLockSec": 3.1,
+      "plateauPitch": -6.7,
+      "plateauSD": 0.18,
+      "onTargetSec": 10.2,
+      "longestOnTargetRunSec": 10.2,
+      "reachedTarget": true,
+      "startedAt": "2026-05-30T19:35:02.011Z",
+      "samples": [{"t": 0, "p": -0.5}],
+      "events": [{"t": 0, "type": "hold_start"}]
+    }
+  ]
+}
+```
+
+`holds[].samples` are intended to be milliseconds since hold start. The
+backend now tolerates older exports where sample times still carry a
+larger session offset and rebases them during analysis.
+
+## Tracking analysis: `dibh-tracking-analysis/v1`
+
+`POST /api/sessions` accepts a `dibh-session/v1` payload and returns a
+tracking diagnostic object:
+
+```json
+{
+  "ok": true,
+  "id": "6e4f8d7a1b2c3456",
+  "storage": {"mode": "file"},
+  "analysis": {
+    "schema": "dibh-tracking-analysis/v1",
+    "trackingConfidence": "guarded",
+    "summary": {
+      "requestedHoldTargetSec": 20,
+      "suggestedSelfTestCapSec": 10,
+      "targetExcursionDeg": -6.07,
+      "reachedTargetCount": 0
+    },
+    "issues": [
+      {
+        "code": "hold_started_near_target",
+        "severity": "warn",
+        "holdIndex": 1,
+        "message": "The hold began already near or beyond the learned target..."
+      }
+    ],
+    "recommendations": [
+      {
+        "code": "require_fresh_breath_evidence",
+        "priority": "high",
+        "message": "Before saying locked-in or hold-steady, require a new inhale excursion after Start..."
+      }
+    ]
+  }
+}
+```
+
+The first backend pass is intentionally storage-light:
+
+- In local development, accepted sessions are written to
+  `.data/dibh-sessions/*.json`.
+- In production, the route logs a compact summary unless
+  `DIBH_SESSION_STORE=file` is configured. Vercel filesystem writes are not
+  durable, so a real store can be added later behind the same endpoint.
+
+Run the same analyzer locally against exported sessions:
+
+```bash
+pnpm session:analyze path/to/dibh-session-*.json
+```

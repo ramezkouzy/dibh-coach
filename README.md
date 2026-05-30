@@ -28,9 +28,10 @@ TTS generator: <https://dibh-coach.vercel.app/tts-generator.html>
 ```
 ┌──────────────────────────────────────────────┐
 │  Next.js 16 + React 19 + Tailwind 4          │
-│  Single-page client-side app (no backend)    │
-│  Deployed on Vercel (static, no serverless   │
-│  beyond /api/log dev sink)                   │
+│  Single-page coaching app + prototype APIs   │
+│  Deployed on Vercel                          │
+│  • /api/log dev sink                         │
+│  • /api/sessions session ingest/analyze      │
 └──────────────────────────────────────────────┘
         │
         ▼
@@ -111,14 +112,21 @@ app/
 │   │   ├── page.tsx          ← main coaching app
 │   │   ├── lab/page.tsx      ← sensor-recording lab (13 channels)
 │   │   ├── api/log/route.ts  ← dev-only log sink for live telemetry
+│   │   ├── api/sessions/route.js
+│   │   │                     ← session ingest + tracking diagnostics
 │   │   ├── layout.tsx
 │   │   └── globals.css
+│   ├── lib/
+│   │   └── tracking-analysis.mjs
+│   │                         ← shared session analyzer
 │   └── audio.ts              ← phrase catalogue + playClip() helper
 ├── public/
 │   ├── audio/                ← 26 pre-recorded clips (Rachel voice)
 │   └── tts-generator.html    ← in-browser regen tool (Puter.js)
 ├── scripts/
 │   ├── generate-tts.mjs      ← one-shot TTS generator
+│   ├── replay-check.mjs      ← historical recording smoke check
+│   ├── analyze-session.mjs   ← exported-session tracking analysis
 │   └── analyze.py            ← lab-recording analyzer (v1 + v2)
 ├── tools/
 │   └── tts-generator.html    ← local-file copy of the generator
@@ -169,6 +177,18 @@ The analyzer prints per-phase pitch and rotation-rate statistics, rolling
 SD percentiles, ASCII traces, and answers the question "would the current
 algorithm have classified this hold as stable" — used heavily during
 threshold tuning.
+
+### Analyzing a self-test session export
+
+```bash
+pnpm session:analyze path/to/dibh-session-*.json
+```
+
+The same logic runs in `POST /api/sessions`. It flags tracking failures
+like a hold starting already near the learned target, unstable Learn
+holds, wrong-direction plateaus, sample timebase offsets, repeated
+drift/regain cycles, and self-test holds that should have been capped at
+10 seconds.
 
 ---
 
