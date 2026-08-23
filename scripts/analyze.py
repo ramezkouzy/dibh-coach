@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
-"""Analyzer for dibh lab recordings — handles v1 (just pitch) and v2 (full sensors).
+"""Analyzer for DIBH lab recordings — handles v1, v2, and P0 v3 captures.
 
-v2 schema:
-    samples: [[t, alpha, beta, gamma, ax, ay, az, agx, agy, agz, rrA, rrB, rrG], ...]
+v2/v3 schema:
+    samples: compact arrays whose fields are named by ``channels``
     channels: [...names matching the array order]
 
 Usage:  python3 analyze.py <recording.json>
@@ -16,7 +16,7 @@ from pathlib import Path
 
 def load(path):
     rec = json.loads(Path(path).read_text())
-    if rec.get("schema") == "dibh-lab/v2":
+    if rec.get("schema") in {"dibh-lab/v2", "dibh-lab/v3"}:
         # Convert array-of-arrays into list of named dicts for the rest of the
         # code's convenience.
         names = rec["channels"]
@@ -24,7 +24,7 @@ def load(path):
         for row in rec["samples"]:
             samples.append({names[i]: row[i] for i in range(len(names))})
         rec["_samples"] = samples
-        return rec, samples, "v2"
+        return rec, samples, "v3" if rec.get("schema") == "dibh-lab/v3" else "v2"
     # v1 — just t,p
     samples = rec["samples"]  # already [{t, p}]
     # Promote p -> beta so the rest of the code is uniform.
@@ -143,6 +143,41 @@ def main():
         print(f"UA: {ua}…")
     print()
 
+    if schema == "v3":
+        analysis = rec.get("analysis", {})
+        quality = analysis.get("quality", {})
+        summary = analysis.get("summary", {})
+        target = summary.get("learnedTarget", {})
+        algorithm = analysis.get("algorithm", rec.get("algorithm", {}))
+        print("P0 embedded analysis:")
+        print(
+            f"  algorithm: {algorithm.get('id', '?')}@{algorithm.get('version', '?')}  "
+            f"valid={analysis.get('valid', False)}"
+        )
+        print(
+            f"  signal: {quality.get('effectiveSampleRateHz', '?')} Hz, "
+            f"longest gap {quality.get('longestGapMs', '?')} ms, "
+            f"beta coverage {quality.get('betaCoveragePct', '?')}%"
+        )
+        print(
+            f"  holds: {summary.get('validHoldCount', 0)}/{summary.get('totalHoldCount', 0)} valid, "
+            f"direction consistency {summary.get('directionConsistencyPct', '?')}%"
+        )
+        print(
+            f"  reproducibility: pose SD {summary.get('preholdPoseSdDeg', '?')}°, "
+            f"absolute plateau SD {summary.get('absolutePlateauSdDeg', '?')}°, "
+            f"signed excursion SD {summary.get('signedExcursionSdDeg', '?')}°"
+        )
+        if target.get("available"):
+            print(
+                f"  learned target: pitch {target.get('targetPitchDeg', '?')}°, "
+                f"excursion {target.get('targetSignedExcursionDeg', '?')}°, "
+                f"experimental band ±{target.get('experimentalTrainingToleranceDeg', '?')}°"
+            )
+        if analysis.get("issues"):
+            print(f"  QC issues: {', '.join(analysis['issues'])}")
+        print()
+
     # Sample rate
     if len(samples) > 1:
         rate = len(samples) / max(0.001, rec.get("durationSec", samples[-1]["t"] / 1000))
@@ -158,9 +193,9 @@ def main():
     print()
 
     # Channel stats — overall
-    if schema == "v2":
+    if schema in {"v2", "v3"}:
         keys = [
-            "beta", "alpha", "gamma",
+            "beta", "betaEma", "alpha", "gamma",
             "ax", "ay", "az",
             "agx", "agy", "agz",
             "rrAlpha", "rrBeta", "rrGamma",
@@ -204,7 +239,7 @@ def main():
         print()
         print(ascii_trace(samples, "beta", width=80, height=6, t_start=t0, t_end=t1, label="beta"))
         # rrBeta during phase — rotation rate around X = direct breath signal
-        if schema == "v2":
+        if schema in {"v2", "v3"}:
             print()
             print(
                 ascii_trace(
@@ -225,6 +260,50 @@ def phase_windows(events, samples):
     free-form hold-start/release pairs otherwise.
     """
     out = []
+    # P0 v3 repeated holds carry holdIndex on every phase marker.
+    indexed_hold_starts = [e for e in events if e["type"] == "hold_start"]
+    if indexed_hold_starts and any(e.get("meta", {}).get("holdIndex") for e in indexed_hold_starts):
+        baseline_start = next((e for e in events if e["type"] == "baseline_start"), None)
+        baseline_end = next((e for e in events if e["type"] == "baseline_end"), None)
+        if baseline_start and baseline_end:
+            out.append(("baseline", baseline_start["t"], baseline_end["t"]))
+        for hold_start in indexed_hold_starts:
+            index = hold_start.get("meta", {}).get("holdIndex")
+            inhale = next(
+                (
+                    e
+                    for e in events
+                    if e["type"] == "inhale_start"
+                    and e.get("meta", {}).get("holdIndex") == index
+                ),
+                None,
+            )
+            release = next(
+                (
+                    e
+                    for e in events
+                    if e["type"] == "release"
+                    and e.get("meta", {}).get("holdIndex") == index
+                ),
+                None,
+            )
+            recovery_end = next(
+                (
+                    e
+                    for e in events
+                    if e["type"] == "recovery_end"
+                    and e.get("meta", {}).get("holdIndex") == index
+                ),
+                None,
+            )
+            if inhale:
+                out.append((f"inhale-{index}", inhale["t"], hold_start["t"]))
+            if release:
+                out.append((f"hold-{index}", hold_start["t"], release["t"]))
+            if release and recovery_end:
+                out.append((f"recovery-{index}", release["t"], recovery_end["t"]))
+        return out
+
     by_type = {e["type"]: e["t"] for e in events}
     if "baseline_start" in by_type and "baseline_end" in by_type:
         out.append(("baseline", by_type["baseline_start"], by_type["baseline_end"]))

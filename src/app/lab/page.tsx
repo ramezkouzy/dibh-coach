@@ -2,15 +2,19 @@
 
 import { useEffect, useRef, useState, useCallback } from "react";
 import { playClip, preloadAll, unlockAudio } from "@/audio";
+import { analyzeLabRecording, LAB_P0_ALGORITHM } from "@/lib/lab-p0-analysis.mjs";
 
-// Schema v2: full multi-channel sensor capture.
-// Each sample is a row of [t, alpha, beta, gamma, ax, ay, az, agx, agy, agz, rrA, rrB, rrG].
+// Schema v3: full multi-channel sensor capture plus the exact EMA pitch used
+// by the P0 analyzer. Raw beta remains available so smoothing can be replayed.
+// Each sample is a row of
+// [t, alpha, beta, betaEma, gamma, ax, ay, az, agx, agy, agz, rrA, rrB, rrG].
 // Fields use null when a sub-event hasn't fired yet. Compact array form keeps
-// JSON tiny so we can ship a 30s recording at 60Hz comfortably.
+// repeated-hold recordings reasonably small at ~60Hz.
 type Sample = [
   number, // t (ms since recording start)
   number | null, // alpha — orientation yaw  (deg)
-  number | null, // beta  — orientation pitch (deg)
+  number | null, // beta  — raw orientation pitch (deg)
+  number | null, // betaEma — browser-computed EMA pitch (deg)
   number | null, // gamma — orientation roll  (deg)
   number | null, // ax    — accel no-gravity X (m/s²)
   number | null, // ay    — accel no-gravity Y
@@ -26,19 +30,30 @@ type Sample = [
 type LabEvent = { t: number; type: string; meta?: unknown };
 
 type Recording = {
-  schema: "dibh-lab/v2";
+  schema: "dibh-lab/v3";
+  sessionId: string;
+  appBuild: string;
+  algorithm: typeof LAB_P0_ALGORITHM;
   scenario: string;
   note: string;
   startedAt: string;
   durationSec: number;
   ua: string;
+  protocol: {
+    mode: "guided" | "free";
+    holdSeconds: number | null;
+    holdCount: number | null;
+    learnHoldCount: number | null;
+  };
   samples: Sample[];
   events: LabEvent[];
+  analysis: ReturnType<typeof analyzeLabRecording>;
   // Channel index lookup for analysis tools
   channels: [
     "t",
     "alpha",
     "beta",
+    "betaEma",
     "gamma",
     "ax",
     "ay",
@@ -63,7 +78,10 @@ const SCENARIOS = [
 ];
 
 const FREE_EVENTS = [
-  ["hold-start", "Start hold"],
+  ["prehold_start", "Prehold start"],
+  ["prehold_end", "Prehold end"],
+  ["inhale_start", "Inhale start"],
+  ["hold_start", "Start hold"],
   ["peak", "At peak"],
   ["stable", "Steady"],
   ["drift-in", "Drift in"],
@@ -72,26 +90,38 @@ const FREE_EVENTS = [
   ["release", "Released"],
 ] as const;
 
-// Guided protocol: baseline (12s) → inhale (5s) → hold (variable) → release (5s).
-// Cues are exactly what the real app says. Markers go into events for boundaries.
+// Guided protocol: baseline → repeated prehold / inhale / hold / recovery cycles.
+// One hold tunes detection, three measure repeatability, and five provide three
+// Learn-style references plus two Practice-style checks against that target.
 type GuidedStep =
-  | { kind: "cue"; clip: Parameters<typeof playClip>[0]; mark?: string }
+  | { kind: "cue"; clip: Parameters<typeof playClip>[0]; mark?: string; meta?: unknown }
+  | { kind: "mark"; type: string; meta?: unknown }
   | { kind: "wait"; seconds: number; label: string };
 
-function guidedProtocol(holdSeconds: number): GuidedStep[] {
-  return [
-    { kind: "cue", clip: "baseline_intro", mark: "baseline_start" },
+function guidedProtocol(holdSeconds: number, holdCount: number): GuidedStep[] {
+  const steps: GuidedStep[] = [
+    { kind: "mark", type: "baseline_start" },
     { kind: "wait", seconds: 12, label: "Breathe normally" },
     { kind: "cue", clip: "baseline_done", mark: "baseline_end" },
-    { kind: "wait", seconds: 1.5, label: "Get ready" },
-    { kind: "cue", clip: "inhale_cue", mark: "inhale_start" },
-    { kind: "wait", seconds: 4, label: "Inhale fully" },
-    { kind: "cue", clip: "locked_in", mark: "hold_start" },
-    { kind: "wait", seconds: holdSeconds, label: "Hold steady" },
-    { kind: "cue", clip: "release_breath", mark: "release" },
-    { kind: "wait", seconds: 6, label: "Breathe normally" },
-    { kind: "cue", clip: "session_done", mark: "session_end" },
   ];
+  for (let index = 1; index <= holdCount; index++) {
+    const role = holdCount >= 4 && index > 3 ? "practice" : "learn";
+    const meta = { holdIndex: index, role };
+    steps.push(
+      { kind: "mark", type: "prehold_start", meta },
+      { kind: "wait", seconds: 2, label: `Hold ${index}: stay relaxed` },
+      { kind: "mark", type: "prehold_end", meta },
+      { kind: "cue", clip: "inhale_cue", mark: "inhale_start", meta },
+      { kind: "wait", seconds: 4, label: `Hold ${index}: inhale fully` },
+      { kind: "cue", clip: "practice_hold", mark: "hold_start", meta },
+      { kind: "wait", seconds: holdSeconds, label: `Hold ${index}: hold steady` },
+      { kind: "cue", clip: "release_breath", mark: "release", meta },
+      { kind: "wait", seconds: 6, label: `Hold ${index}: breathe normally` },
+      { kind: "mark", type: "recovery_end", meta },
+    );
+  }
+  steps.push({ kind: "cue", clip: "session_done", mark: "session_end" });
+  return steps;
 }
 
 export default function LabPage() {
@@ -114,6 +144,7 @@ export default function LabPage() {
   const [guidedActive, setGuidedActive] = useState(false);
   const [guidedLabel, setGuidedLabel] = useState<string>("");
   const [guidedHoldSec, setGuidedHoldSec] = useState<number>(20);
+  const [guidedHoldCount, setGuidedHoldCount] = useState<number>(3);
   const [stepCountdown, setStepCountdown] = useState<number>(0);
 
   // ---- refs ---------------------------------------------------------------
@@ -121,10 +152,21 @@ export default function LabPage() {
   const eventsRef = useRef<LabEvent[]>([]);
   const startedAtRef = useRef<number>(0);
   const startedAtIsoRef = useRef<string>("");
+  const sessionIdRef = useRef<string>("");
+  const activeScenarioRef = useRef<string>(SCENARIOS[0]);
+  const recordingRef = useRef(false);
+  const guidedConfigRef = useRef<{ holdSeconds: number; holdCount: number } | null>(null);
+  const betaEmaRef = useRef<number | null>(null);
   // Latest values from each event stream — combined on each tick.
-  const oRef = useRef<{ alpha: number | null; beta: number | null; gamma: number | null }>({
+  const oRef = useRef<{
+    alpha: number | null;
+    beta: number | null;
+    betaEma: number | null;
+    gamma: number | null;
+  }>({
     alpha: null,
     beta: null,
+    betaEma: null,
     gamma: null,
   });
   const mRef = useRef<{
@@ -185,7 +227,19 @@ export default function LabPage() {
   useEffect(() => {
     if (!granted) return;
     const onOrient = (e: DeviceOrientationEvent) => {
-      oRef.current = { alpha: e.alpha, beta: e.beta, gamma: e.gamma };
+      if (e.beta != null) {
+        betaEmaRef.current =
+          betaEmaRef.current == null
+            ? e.beta
+            : betaEmaRef.current * (1 - LAB_P0_ALGORITHM.params.emaAlpha) +
+              e.beta * LAB_P0_ALGORITHM.params.emaAlpha;
+      }
+      oRef.current = {
+        alpha: e.alpha,
+        beta: e.beta,
+        betaEma: betaEmaRef.current,
+        gamma: e.gamma,
+      };
       pushSample();
     };
     const onMotion = (e: DeviceMotionEvent) => {
@@ -219,6 +273,7 @@ export default function LabPage() {
           t,
           o.alpha != null ? +o.alpha.toFixed(3) : null,
           o.beta != null ? +o.beta.toFixed(3) : null,
+          o.betaEma != null ? +o.betaEma.toFixed(3) : null,
           o.gamma != null ? +o.gamma.toFixed(3) : null,
           m.ax != null ? +m.ax.toFixed(4) : null,
           m.ay != null ? +m.ay.toFixed(4) : null,
@@ -233,7 +288,7 @@ export default function LabPage() {
       }
       if (now - lastDispRef.current > 100) {
         lastDispRef.current = now;
-        const beta = oRef.current.beta;
+        const beta = oRef.current.betaEma ?? oRef.current.beta;
         if (beta != null) setPitch(beta);
         if (recording) {
           setDuration((now - startedAtRef.current) / 1000);
@@ -283,15 +338,23 @@ export default function LabPage() {
   }, []);
 
   // ---- recording control --------------------------------------------------
-  const startRec = (sc?: string) => {
+  const startRec = (
+    sc?: string,
+    guidedConfig?: { holdSeconds: number; holdCount: number } | null,
+  ) => {
     samplesRef.current = [];
     eventsRef.current = [];
     setEvents([]);
     startedAtRef.current = performance.now();
     startedAtIsoRef.current = new Date().toISOString();
+    sessionIdRef.current = newSessionId();
+    activeScenarioRef.current =
+      sc ?? (scenario === "custom" && customScenario ? customScenario : scenario);
+    guidedConfigRef.current = guidedConfig ?? null;
+    recordingRef.current = true;
+    lastSampleAtRef.current = 0;
     setDuration(0);
     setCount(0);
-    if (sc) setScenario(sc);
     setRecording(true);
   };
 
@@ -306,22 +369,34 @@ export default function LabPage() {
   };
 
   const stopRec = () => {
+    if (!recordingRef.current) return;
+    recordingRef.current = false;
     setRecording(false);
     const totalDur = (performance.now() - startedAtRef.current) / 1000;
-    const sc = scenario === "custom" && customScenario ? customScenario : scenario;
-    const rec: Recording = {
-      schema: "dibh-lab/v2",
-      scenario: sc,
+    const guidedConfig = guidedConfigRef.current;
+    const recordingBase = {
+      schema: "dibh-lab/v3" as const,
+      sessionId: sessionIdRef.current,
+      appBuild: "lab-p0.1",
+      algorithm: LAB_P0_ALGORITHM,
+      scenario: activeScenarioRef.current,
       note,
       startedAt: startedAtIsoRef.current,
       durationSec: +totalDur.toFixed(2),
       ua: navigator.userAgent,
+      protocol: {
+        mode: guidedConfig ? ("guided" as const) : ("free" as const),
+        holdSeconds: guidedConfig?.holdSeconds ?? null,
+        holdCount: guidedConfig?.holdCount ?? null,
+        learnHoldCount: guidedConfig ? Math.min(3, guidedConfig.holdCount) : null,
+      },
       samples: samplesRef.current,
       events: eventsRef.current,
       channels: [
         "t",
         "alpha",
         "beta",
+        "betaEma",
         "gamma",
         "ax",
         "ay",
@@ -332,7 +407,11 @@ export default function LabPage() {
         "rrAlpha",
         "rrBeta",
         "rrGamma",
-      ],
+      ] as Recording["channels"],
+    };
+    const rec: Recording = {
+      ...recordingBase,
+      analysis: analyzeLabRecording(recordingBase),
     };
     setLast(rec);
     download(rec);
@@ -346,19 +425,18 @@ export default function LabPage() {
       return;
     }
     if (recording) return;
-    const sc = `guided-${guidedHoldSec}s`;
-    setScenario(sc);
-    startRec(sc);
+    const sc = `p0-${guidedHoldCount}x${guidedHoldSec}s`;
+    startRec(sc, { holdSeconds: guidedHoldSec, holdCount: guidedHoldCount });
     setGuidedActive(true);
     guidedRunningRef.current = true;
-    const steps = guidedProtocol(guidedHoldSec);
+    const steps = guidedProtocol(guidedHoldSec, guidedHoldCount);
     for (const step of steps) {
       if (!guidedRunningRef.current) break;
       if (step.kind === "cue") {
         playClip(step.clip);
-        if (step.mark) mark(step.mark);
-        // give the cue audio a moment to land
-        await sleep(800);
+        if (step.mark) mark(step.mark, step.meta);
+      } else if (step.kind === "mark") {
+        mark(step.type, step.meta);
       } else {
         setGuidedLabel(step.label);
         for (let s = step.seconds; s > 0 && guidedRunningRef.current; s--) {
@@ -371,7 +449,7 @@ export default function LabPage() {
     setGuidedActive(false);
     setGuidedLabel("");
     guidedRunningRef.current = false;
-    if (recording) {
+    if (recordingRef.current) {
       // small grace before download
       await sleep(400);
       stopRec();
@@ -382,7 +460,7 @@ export default function LabPage() {
     guidedRunningRef.current = false;
     setGuidedActive(false);
     setGuidedLabel("");
-    if (recording) stopRec();
+    if (recordingRef.current) stopRec();
   };
 
   // ---- render -------------------------------------------------------------
@@ -399,15 +477,15 @@ export default function LabPage() {
     >
       <div className="max-w-md w-full mx-auto flex flex-col gap-3">
         <div className="flex items-baseline justify-between">
-          <h1 className="text-lg font-semibold">DIBH Lab v2</h1>
+          <h1 className="text-lg font-semibold">DIBH Lab P0</h1>
           <a href="/" className="text-xs underline opacity-70">
             ← coach
           </a>
         </div>
         <p className="text-xs opacity-70 leading-relaxed">
-          Captures all 13 sensor channels (orientation × 3, accel × 6, rotation rate × 3)
-          + cue events. JSON downloads at the end. Guided mode plays the same
-          audio cues as the real app.
+          Measurement harness for repeatable RT breath-hold coaching. Captures raw
+          sensors, EMA pitch, exact phase markers, stability segments, placement drift,
+          breath excursion, and plateau reproducibility in one replayable JSON.
         </p>
 
         {!granted ? (
@@ -431,7 +509,7 @@ export default function LabPage() {
               style={{ background: "#1c1f26", border: "1px solid #303441" }}
             >
               <div className="flex items-center justify-between">
-                <div className="text-xs uppercase tracking-wider opacity-60">Guided session</div>
+                <div className="text-xs uppercase tracking-wider opacity-60">P0 guided run</div>
                 <select
                   value={guidedHoldSec}
                   onChange={(e) => setGuidedHoldSec(parseInt(e.target.value))}
@@ -446,13 +524,24 @@ export default function LabPage() {
                   ))}
                 </select>
               </div>
+              <select
+                value={guidedHoldCount}
+                onChange={(e) => setGuidedHoldCount(parseInt(e.target.value))}
+                disabled={recording}
+                className="rounded p-2 text-xs"
+                style={{ background: "#0a0c10", color: "#e7e5e4", border: "1px solid #303441" }}
+              >
+                <option value={1}>1 hold · detector check</option>
+                <option value={3}>3 holds · repeatability</option>
+                <option value={5}>5 holds · 3 learn + 2 practice</option>
+              </select>
               {!guidedActive ? (
                 <button
                   onClick={startGuided}
                   className="rounded-md py-3 font-semibold"
                   style={{ background: "#16a34a", color: "white" }}
                 >
-                  ▶ Start guided session
+                  ▶ Start P0 run
                 </button>
               ) : (
                 <>
@@ -472,9 +561,9 @@ export default function LabPage() {
                 </>
               )}
               <div className="text-[11px] opacity-60 leading-relaxed">
-                Plays cues: baseline → inhale → hold → release. Lay back, phone in
-                portrait under your sternum, follow the voice. Auto-downloads on
-                finish.
+                Each hold records a quiet prehold anchor, inhale, hold, and recovery.
+                Keep the charging-port edge anchored on the sternum for the entire run.
+                The download is automatic when all holds finish.
               </div>
             </div>
 
@@ -573,6 +662,48 @@ export default function LabPage() {
                 <div className="opacity-80">
                   {last.durationSec}s · {last.samples.length} samples · {last.events.length} events
                 </div>
+                <div className="mt-2 grid grid-cols-2 gap-1.5">
+                  <MiniStat
+                    label="sample rate"
+                    value={`${last.analysis.quality.effectiveSampleRateHz ?? "—"} Hz`}
+                  />
+                  <MiniStat
+                    label="longest gap"
+                    value={`${last.analysis.quality.longestGapMs ?? "—"} ms`}
+                  />
+                  <MiniStat
+                    label="baseline SD"
+                    value={`${last.analysis.baseline?.sdDeg ?? "—"}°`}
+                  />
+                  <MiniStat
+                    label="valid holds"
+                    value={`${last.analysis.summary.validHoldCount}/${last.analysis.summary.totalHoldCount}`}
+                  />
+                  <MiniStat
+                    label="pose SD"
+                    value={`${last.analysis.summary.preholdPoseSdDeg ?? "—"}°`}
+                  />
+                  <MiniStat
+                    label="excursion SD"
+                    value={`${last.analysis.summary.signedExcursionSdDeg ?? "—"}°`}
+                  />
+                  <MiniStat
+                    label="plateau SD"
+                    value={`${last.analysis.summary.absolutePlateauSdDeg ?? "—"}°`}
+                  />
+                  <MiniStat
+                    label="direction"
+                    value={`${last.analysis.summary.directionConsistencyPct ?? "—"}%`}
+                  />
+                </div>
+                {last.analysis.issues.length > 0 && (
+                  <div
+                    className="mt-2 rounded p-2 leading-relaxed"
+                    style={{ background: "#3a260f", color: "#fdba74" }}
+                  >
+                    QC: {last.analysis.issues.join(", ")}
+                  </div>
+                )}
                 <button
                   onClick={() => download(last)}
                   className="mt-2 rounded px-3 py-1.5 text-xs"
@@ -607,17 +738,35 @@ function Stat({ label, value }: { label: string; value: string }) {
   );
 }
 
+function MiniStat({ label, value }: { label: string; value: string }) {
+  return (
+    <div className="rounded p-1.5" style={{ background: "#0a0c10" }}>
+      <div className="text-[9px] uppercase tracking-wider opacity-50">{label}</div>
+      <div className="mt-0.5 font-mono tabular-nums">{value}</div>
+    </div>
+  );
+}
+
 function sleep(ms: number) {
   return new Promise<void>((res) => setTimeout(res, ms));
+}
+
+function newSessionId() {
+  if (typeof crypto !== "undefined" && typeof crypto.randomUUID === "function") {
+    return crypto.randomUUID();
+  }
+  return `lab-${Date.now()}-${Math.random().toString(16).slice(2)}`;
 }
 
 function download(rec: Recording) {
   const blob = new Blob([JSON.stringify(rec)], { type: "application/json" });
   const a = document.createElement("a");
-  a.href = URL.createObjectURL(blob);
+  const url = URL.createObjectURL(blob);
+  a.href = url;
   const ts = rec.startedAt.replace(/[:.]/g, "-").replace(/T/, "_").slice(0, 19);
   a.download = `dibh-${rec.scenario}-${ts}.json`;
   document.body.appendChild(a);
   a.click();
   a.remove();
+  URL.revokeObjectURL(url);
 }

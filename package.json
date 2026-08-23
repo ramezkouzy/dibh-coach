@@ -6,6 +6,7 @@
     "dev": "next dev",
     "build": "next build",
     "start": "next start",
+    "lab:p0:check": "node scripts/lab-p0-check.mjs",
     "replay:check": "node scripts/replay-check.mjs",
     "session:analyze": "node scripts/analyze-session.mjs",
     "tts:generate": "node scripts/generate-tts.mjs"

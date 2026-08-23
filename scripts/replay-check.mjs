@@ -48,8 +48,8 @@ function rollingSd(samples, windowMs) {
 }
 
 function loadSamples(rec) {
-  if (rec.schema === "dibh-lab/v2") {
-    const betaIdx = rec.channels.indexOf("beta");
+  if (rec.schema === "dibh-lab/v2" || rec.schema === "dibh-lab/v3") {
+    const betaIdx = rec.channels.indexOf(rec.channels.includes("betaEma") ? "betaEma" : "beta");
     if (betaIdx < 0) throw new Error("missing beta channel");
     return rec.samples
       .map((row) => ({ t: row[0], p: row[betaIdx] }))

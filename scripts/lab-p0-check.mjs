@@ -1,0 +1,102 @@
+#!/usr/bin/env node
+import assert from "node:assert/strict";
+
+import { analyzeLabRecording } from "../src/lib/lab-p0-analysis.mjs";
+
+const CHANNELS = [
+  "t",
+  "alpha",
+  "beta",
+  "betaEma",
+  "gamma",
+  "ax",
+  "ay",
+  "az",
+  "agx",
+  "agy",
+  "agz",
+  "rrAlpha",
+  "rrBeta",
+  "rrGamma",
+];
+
+function synthRecording(direction, holdCount = 5) {
+  const stepMs = 20;
+  const samples = [];
+  const events = [];
+  let cursor = 0;
+  let previousPitch = 0;
+
+  const append = (durationMs, pitchAt) => {
+    const start = cursor;
+    for (let t = start; t < start + durationMs; t += stepMs) {
+      const pitch = pitchAt(t - start, durationMs, t);
+      const rrBeta = ((pitch - previousPitch) / stepMs) * 1000;
+      previousPitch = pitch;
+      samples.push([t, 0, pitch, pitch, 0, 0, 0, 0, 0, 0, 9.81, 0, rrBeta, 0]);
+    }
+    cursor += durationMs;
+  };
+
+  events.push({ t: cursor, type: "baseline_start" });
+  append(12_000, (_local, _duration, t) => Math.sin((t / 2500) * Math.PI * 2));
+  events.push({ t: cursor, type: "baseline_end" });
+
+  for (let holdIndex = 1; holdIndex <= holdCount; holdIndex++) {
+    const meta = { holdIndex, role: holdIndex <= 3 ? "learn" : "practice" };
+    const offset = (holdIndex - 2) * 0.08;
+    events.push({ t: cursor, type: "prehold_start", meta });
+    append(2_000, (_local, _duration, t) => 0.03 * Math.sin(t / 90));
+    events.push({ t: cursor, type: "prehold_end", meta });
+    events.push({ t: cursor, type: "inhale_start", meta });
+    append(4_000, (local, duration) => direction * 8 * (local / duration));
+    events.push({ t: cursor, type: "hold_start", meta });
+    append(
+      10_000,
+      (_local, _duration, t) => direction * (8 + offset) + 0.04 * Math.sin(t / 75),
+    );
+    events.push({ t: cursor, type: "release", meta });
+    append(4_000, (local, duration) => direction * 8 * (1 - local / duration));
+    events.push({ t: cursor, type: "recovery_end", meta });
+  }
+  events.push({ t: cursor, type: "session_end" });
+
+  return {
+    schema: "dibh-lab/v3",
+    durationSec: cursor / 1000,
+    protocol: { holdSeconds: 10 },
+    channels: CHANNELS,
+    samples,
+    events,
+  };
+}
+
+for (const direction of [-1, 1]) {
+  const recording = synthRecording(direction);
+  const first = analyzeLabRecording(recording);
+  const second = analyzeLabRecording(recording);
+  assert.deepEqual(first, second, "analysis must be deterministic");
+  assert.equal(first.valid, true);
+  assert.equal(first.summary.validHoldCount, 5);
+  assert.equal(first.summary.learnedDirection, direction);
+  assert.equal(first.summary.directionConsistencyPct, 100);
+  assert.ok(first.summary.preholdPoseSdDeg < 0.05);
+  assert.ok(first.summary.absolutePlateauSdDeg < 0.2);
+  assert.ok(first.summary.signedExcursionSdDeg < 0.2);
+  assert.equal(first.summary.learnedTarget.available, true);
+  assert.equal(first.summary.practice.length, 2);
+  for (const practice of first.summary.practice) {
+    assert.ok(practice.longestStableOnTargetRunSec > 6);
+    assert.equal(practice.reachedRequestedDuration, false);
+  }
+  for (const hold of first.holds) {
+    assert.equal(hold.valid, true);
+    assert.ok(hold.firstLockFromHoldStartSec >= 2.7);
+    assert.ok(hold.firstLockFromHoldStartSec <= 3.2);
+    assert.ok(hold.bestStableSegment.durationSec > 6);
+    assert.ok(hold.bestStableSegment.sdDeg < 0.1);
+    assert.ok(Math.abs(hold.bestStableSegment.slopeDegPerSec) < 0.02);
+  }
+}
+
+console.log("Lab P0 synthetic replay checks passed for both pitch directions.");

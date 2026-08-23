@@ -1,6 +1,6 @@
 # Lab recording schemas
 
-Two formats coexist; the analyzer (`scripts/analyze.py`) handles both.
+Three formats coexist; the analyzer (`scripts/analyze.py`) handles all of them.
 
 ## v1 (legacy, single-channel)
 
@@ -22,7 +22,7 @@ millisecond timeline.
 Used by the original `/lab` page (now superseded). Older recordings on
 disk are still analysable.
 
-## v2 (current, full multi-channel)
+## v2 (legacy full multi-channel)
 
 ```json
 {
@@ -104,6 +104,105 @@ budget.
 `schema: "dibh-lab/v2"` key. v1 files are auto-promoted by mapping `p`
 to `beta` in the in-memory representation, so the same per-channel and
 per-phase reports work uniformly across both.
+
+## v3 (current P0 measurement harness)
+
+`dibh-lab/v3` preserves the v2 raw channels, adds `betaEma`, and embeds a
+versioned deterministic analysis. Guided runs can record 1, 3, or 5 repeated
+holds without moving the phone:
+
+- 1 hold: detector and plateau check
+- 3 holds: placement, plateau, and excursion repeatability
+- 5 holds: the first 3 are Learn-style references and the final 2 are
+  Practice-style checks against the learned target
+
+```json
+{
+  "schema": "dibh-lab/v3",
+  "sessionId": "33d87e61-79ee-45c7-9543-7c8d5e4e7405",
+  "appBuild": "lab-p0.1",
+  "algorithm": {
+    "id": "dibh-lab-p0",
+    "version": "0.1.0",
+    "params": {
+      "emaAlpha": 0.3,
+      "stabilityWindowMs": 2000,
+      "stableSlopeCeilingDegPerSec": 0.25
+    }
+  },
+  "protocol": {
+    "mode": "guided",
+    "holdSeconds": 20,
+    "holdCount": 5,
+    "learnHoldCount": 3
+  },
+  "channels": [
+    "t", "alpha", "beta", "betaEma", "gamma",
+    "ax", "ay", "az", "agx", "agy", "agz",
+    "rrAlpha", "rrBeta", "rrGamma"
+  ],
+  "samples": [],
+  "events": [
+    {"t": 0, "type": "baseline_start"},
+    {"t": 12800, "type": "baseline_end"},
+    {"t": 13600, "type": "prehold_start", "meta": {"holdIndex": 1, "role": "learn"}},
+    {"t": 15600, "type": "prehold_end", "meta": {"holdIndex": 1, "role": "learn"}},
+    {"t": 15600, "type": "inhale_start", "meta": {"holdIndex": 1, "role": "learn"}},
+    {"t": 20400, "type": "hold_start", "meta": {"holdIndex": 1, "role": "learn"}},
+    {"t": 41200, "type": "release", "meta": {"holdIndex": 1, "role": "learn"}},
+    {"t": 48000, "type": "recovery_end", "meta": {"holdIndex": 1, "role": "learn"}}
+  ],
+  "analysis": {
+    "schema": "dibh-lab-analysis/v1",
+    "quality": {},
+    "baseline": {},
+    "holds": [],
+    "summary": {},
+    "valid": true,
+    "issues": []
+  }
+}
+```
+
+### P0 analysis semantics
+
+The analyzer uses `betaEma` when available and falls back to raw `beta` for
+older recordings. A stable window must satisfy both:
+
+```text
+rolling pitch SD < adaptive threshold
+absolute rolling pitch slope < 0.25 degrees/second
+```
+
+This prevents a slow, smooth inhale ramp from being mistaken for a plateau.
+The SD condition must persist for 1 second before lock; loss of the combined
+condition must persist for 1.5 seconds before a confirmed drift. Stable
+segments retain their exact boundaries, and plateau statistics are calculated
+from the segment interior rather than from the end of the entire attempt.
+
+Each hold records a quiet prehold anchor. Session reproducibility is decomposed
+into:
+
+- `preholdPoseSdDeg`: phone/starting-pose consistency
+- `absolutePlateauSdDeg`: absolute held phone-angle consistency
+- `signedExcursionSdDeg`: breath-excursion consistency after normalizing the
+  direction in which pitch moved
+
+`freshInhaleExcursionAtHoldStartDeg` records how far the phone moved from that
+anchor before the hold began. A hold is flagged when it does not show at least
+1.5 degrees of new movement in its learned direction; this makes a phone that
+was already near the target distinguishable from a new inhalation.
+
+For 5-hold runs, the final two holds also report absolute and excursion target
+error, whether their plateau falls inside the experimental band, their longest
+continuous stable-and-on-target run, and whether that run reached the selected
+duration.
+
+The embedded target band is explicitly named
+`experimentalTrainingToleranceDeg`. It is derived from typical within-hold
+noise and clamped to 0.5–2.0 degrees; inconsistent Learn holds do not
+automatically widen it. It is a detector-development value, not a clinically
+validated RT tolerance.
 
 ---
 

@@ -7,7 +7,7 @@ through three short phases, and receives quantitative feedback on the
 **reproducibility** of their hold across attempts.
 
 Live: <https://dibh-coach.vercel.app>
-Lab (sensor recording): <https://dibh-coach.vercel.app/lab>
+Lab (P0 measurement harness): <https://dibh-coach.vercel.app/lab>
 TTS generator: <https://dibh-coach.vercel.app/tts-generator.html>
 
 ---
@@ -110,7 +110,7 @@ app/
 ├── src/
 │   ├── app/
 │   │   ├── page.tsx          ← main coaching app
-│   │   ├── lab/page.tsx      ← sensor-recording lab (13 channels)
+│   │   ├── lab/page.tsx      ← P0 sensor + repeatability measurement harness
 │   │   ├── api/log/route.ts  ← dev-only log sink for live telemetry
 │   │   ├── api/sessions/route.js
 │   │   │                     ← session ingest + tracking diagnostics
@@ -177,6 +177,19 @@ The analyzer prints per-phase pitch and rotation-rate statistics, rolling
 SD percentiles, ASCII traces, and answers the question "would the current
 algorithm have classified this hold as stable" — used heavily during
 threshold tuning.
+
+The current `dibh-lab/v3` guided harness records 1, 3, or 5 repeated holds,
+including a quiet prehold anchor for every attempt. It stores all 13 hardware
+channels plus EMA pitch, exact phase markers, versioned detector parameters,
+stable-segment boundaries, and separate metrics for phone-pose consistency,
+absolute plateau consistency, and breath-excursion consistency.
+
+```bash
+pnpm lab:p0:check
+```
+
+The synthetic check verifies that the P0 analyzer is deterministic and works
+when inhalation moves pitch in either direction.
 
 ### Analyzing a self-test session export
 
