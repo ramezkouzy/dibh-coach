@@ -108,22 +108,21 @@ per-phase reports work uniformly across both.
 ## v3 (current P0 measurement harness)
 
 `dibh-lab/v3` preserves the v2 raw channels, adds `betaEma`, and embeds a
-versioned deterministic analysis. Guided runs can record 1, 3, or 5 repeated
-holds without moving the phone:
+versioned deterministic analysis. Guided runs can record 3 or 5 repeated holds
+without touching the phone after Start:
 
-- 1 hold: detector and plateau check
-- 3 holds: placement, plateau, and excursion repeatability
+- 3 holds: calibration of a patient-specific relative excursion target
 - 5 holds: the first 3 are Learn-style references and the final 2 are
-  Practice-style checks against the learned target
+  audio-guided Practice-style checks against the fixed learned target
 
 ```json
 {
   "schema": "dibh-lab/v3",
   "sessionId": "33d87e61-79ee-45c7-9543-7c8d5e4e7405",
-  "appBuild": "lab-p0.1",
+  "appBuild": "lab-p0.2",
   "algorithm": {
     "id": "dibh-lab-p0",
-    "version": "0.1.0",
+    "version": "0.2.0",
     "params": {
       "emaAlpha": 0.3,
       "stabilityWindowMs": 2000,
@@ -132,9 +131,12 @@ holds without moving the phone:
   },
   "protocol": {
     "mode": "guided",
-    "holdSeconds": 20,
+    "holdSeconds": 10,
     "holdCount": 5,
-    "learnHoldCount": 3
+    "learnHoldCount": 3,
+    "recoverySeconds": 20,
+    "handsFree": true,
+    "targetMethod": "median_relative_excursion"
   },
   "channels": [
     "t", "alpha", "beta", "betaEma", "gamma",
@@ -180,8 +182,12 @@ condition must persist for 1.5 seconds before a confirmed drift. Stable
 segments retain their exact boundaries, and plateau statistics are calculated
 from the segment interior rather than from the end of the entire attempt.
 
-Each hold records a quiet prehold anchor. Session reproducibility is decomposed
-into:
+Each hold records its own quiet prehold anchor. The learned target is the robust
+median of the first three valid, direction-normalized excursions from those
+anchors. Absolute pitch is diagnostic only; every practice target is translated
+from the current attempt's relaxed anchor. The target remains fixed for the
+session and is not weakened by later performance. Session reproducibility is
+decomposed into:
 
 - `preholdPoseSdDeg`: phone/starting-pose consistency
 - `absolutePlateauSdDeg`: absolute held phone-angle consistency
@@ -194,9 +200,17 @@ anchor before the hold began. A hold is flagged when it does not show at least
 was already near the target distinguishable from a new inhalation.
 
 For 5-hold runs, the final two holds also report absolute and excursion target
-error, whether their plateau falls inside the experimental band, their longest
-continuous stable-and-on-target run, and whether that run reached the selected
-duration.
+error, target-acquisition time, whether their plateau falls inside the
+experimental band, their longest continuous stable-and-on-target run, whether
+that run reached the selected duration, and the audio guidance issued. If three
+valid calibration holds do not produce a target, practice stops rather than
+silently using an invalid target.
+
+Recovery is also hands-free. The runner waits for the configured minimum rest,
+then requires a low-variability, low-slope resting window to persist before the
+next inhale cue. `recovery_minimum_complete`, `rest_anchor_acquired`,
+`recovery_end`, `target_learned`, `target_acquired`, `target_enter`,
+`target_exit`, and `coach_cue` events make that control flow replayable.
 
 The embedded target band is explicitly named
 `experimentalTrainingToleranceDeg`. It is derived from typical within-hold

@@ -45,18 +45,38 @@ function synthRecording(direction, holdCount = 5) {
   for (let holdIndex = 1; holdIndex <= holdCount; holdIndex++) {
     const meta = { holdIndex, role: holdIndex <= 3 ? "learn" : "practice" };
     const offset = (holdIndex - 2) * 0.08;
+    // Deliberately move the absolute phone pose between attempts. The target
+    // must still be learned and scored from excursion relative to each hold's
+    // own relaxed anchor, not from absolute pitch.
+    const restPitch = (holdIndex - 1) * 1.25;
     events.push({ t: cursor, type: "prehold_start", meta });
-    append(2_000, (_local, _duration, t) => 0.03 * Math.sin(t / 90));
+    append(2_000, (_local, _duration, t) => restPitch + 0.03 * Math.sin(t / 90));
     events.push({ t: cursor, type: "prehold_end", meta });
     events.push({ t: cursor, type: "inhale_start", meta });
-    append(4_000, (local, duration) => direction * 8 * (local / duration));
+    append(4_000, (local, duration) => restPitch + direction * 8 * (local / duration));
+    if (meta.role === "practice") {
+      events.push({
+        t: cursor,
+        type: "target_acquired",
+        meta: { ...meta, measuredExcursionDeg: 8 + offset },
+      });
+      events.push({
+        t: cursor,
+        type: "coach_cue",
+        meta: { ...meta, cue: "right_there", reason: "target_acquired" },
+      });
+    }
     events.push({ t: cursor, type: "hold_start", meta });
     append(
       10_000,
-      (_local, _duration, t) => direction * (8 + offset) + 0.04 * Math.sin(t / 75),
+      (_local, _duration, t) =>
+        restPitch + direction * (8 + offset) + 0.04 * Math.sin(t / 75),
     );
     events.push({ t: cursor, type: "release", meta });
-    append(4_000, (local, duration) => direction * 8 * (1 - local / duration));
+    append(
+      4_000,
+      (local, duration) => restPitch + direction * 8 * (1 - local / duration),
+    );
     events.push({ t: cursor, type: "recovery_end", meta });
   }
   events.push({ t: cursor, type: "session_end" });
@@ -80,14 +100,18 @@ for (const direction of [-1, 1]) {
   assert.equal(first.summary.validHoldCount, 5);
   assert.equal(first.summary.learnedDirection, direction);
   assert.equal(first.summary.directionConsistencyPct, 100);
-  assert.ok(first.summary.preholdPoseSdDeg < 0.05);
-  assert.ok(first.summary.absolutePlateauSdDeg < 0.2);
+  assert.ok(first.summary.preholdPoseSdDeg > 1);
+  assert.ok(first.summary.absolutePlateauSdDeg > 1);
   assert.ok(first.summary.signedExcursionSdDeg < 0.2);
   assert.equal(first.summary.learnedTarget.available, true);
+  assert.ok(Math.abs(first.summary.learnedTarget.targetSignedExcursionDeg - 8) < 0.1);
   assert.equal(first.summary.practice.length, 2);
   for (const practice of first.summary.practice) {
     assert.ok(practice.longestStableOnTargetRunSec > 6);
     assert.equal(practice.reachedRequestedDuration, false);
+    assert.equal(practice.targetAcquiredFromInhaleSec, 4);
+    assert.equal(practice.coachingCueCount, 1);
+    assert.equal(practice.correctionCueCount, 0);
   }
   for (const hold of first.holds) {
     assert.equal(hold.valid, true);

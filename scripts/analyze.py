@@ -170,9 +170,39 @@ def main():
         )
         if target.get("available"):
             print(
-                f"  learned target: pitch {target.get('targetPitchDeg', '?')}°, "
-                f"excursion {target.get('targetSignedExcursionDeg', '?')}°, "
+                f"  learned relative excursion: {target.get('targetSignedExcursionDeg', '?')}°, "
                 f"experimental band ±{target.get('experimentalTrainingToleranceDeg', '?')}°"
+            )
+        practice_by_index = {
+            item.get("index"): item for item in summary.get("practice", [])
+        }
+        for hold in analysis.get("holds", []):
+            best = hold.get("bestStableSegment") or {}
+            relative_excursion = hold.get("relativeExcursionDeg")
+            if relative_excursion is None and isinstance(hold.get("rawExcursionDeg"), (int, float)):
+                relative_excursion = abs(hold["rawExcursionDeg"])
+            line = (
+                f"  hold {hold.get('index', '?')} {hold.get('role', '?')}: "
+                f"excursion {relative_excursion if relative_excursion is not None else '?'}°, "
+                f"stable after {hold.get('firstLockFromHoldStartSec', '?')}s, "
+                f"longest stable {best.get('durationSec', '?')}s, "
+                f"hold SD {best.get('robustSdDeg', best.get('sdDeg', '?'))}°"
+            )
+            practice = practice_by_index.get(hold.get("index"))
+            if practice:
+                line += (
+                    f", target error {practice.get('excursionTargetErrorDeg', '?')}°, "
+                    f"steady + near target {practice.get('longestStableOnTargetRunSec', '?')}s, "
+                    f"direction corrections {practice.get('correctionCueCount', 0)}"
+                )
+            print(line)
+        trend = summary.get("sequenceTrend", {})
+        if trend:
+            print(
+                "  repetition trend (descriptive only): "
+                f"excursion {trend.get('relativeExcursionSlopeDegPerHold', '?')}°/hold, "
+                f"time-to-stable {trend.get('timeToStableSlopeSecPerHold', '?')}s/hold, "
+                f"stable duration {trend.get('stableDurationSlopeSecPerHold', '?')}s/hold"
             )
         if analysis.get("issues"):
             print(f"  QC issues: {', '.join(analysis['issues'])}")

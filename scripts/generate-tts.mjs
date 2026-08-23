@@ -17,6 +17,9 @@ const OUT_DIR = path.join(ROOT, "public", "audio");
 // Mirror src/audio.ts. Kept inline so the script has no TS toolchain dep.
 const PHRASES = {
   baseline_intro: "Breathe normally for twenty seconds.",
+  placement_countdown: "Place the phone on your belly. The session begins in five seconds.",
+  baseline_intro_12: "Breathe normally and relax while I learn your resting movement.",
+  prepare_anchor: "Take a normal breath in, breathe out, and relax.",
   baseline_low_data: "Not enough data. Let's try again.",
   baseline_no_breath: "I could not see your breathing. Place the phone on your belly and try again.",
   baseline_too_much: "There was too much movement. Let's try again.",
@@ -33,6 +36,7 @@ const PHRASES = {
   learn_got_one: "Good. Two more like that.",
   learn_got_two: "One more comfortable hold.",
   learn_target_locked: "Target locked. Let's match it.",
+  calibration_incomplete: "I could not learn a reliable target from those holds. Session complete.",
   go_deeper: "A little deeper.",
   ease_back: "Ease back a touch.",
   right_there: "Right there. Hold steady.",

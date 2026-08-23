@@ -1,6 +1,6 @@
 export const LAB_P0_ALGORITHM = Object.freeze({
   id: "dibh-lab-p0",
-  version: "0.1.0",
+  version: "0.2.0",
   params: Object.freeze({
     emaAlpha: 0.3,
     stabilityWindowMs: 2000,
@@ -15,6 +15,12 @@ export const LAB_P0_ALGORITHM = Object.freeze({
     trainingToleranceCeilingDeg: 2,
     trainingToleranceNoiseMultiplier: 2,
     minimumTargetExcursionDeg: 1.5,
+    restingWindowMs: 2000,
+    restingSdCeilingDeg: 0.35,
+    restingSlopeCeilingDegPerSec: 0.25,
+    recoveryDwellMs: 1500,
+    targetAcquireDwellMs: 750,
+    targetCueCooldownMs: 2500,
     longGapMs: 50,
   }),
 });
@@ -63,6 +69,13 @@ function linearSlope(points) {
     denominator += (xs[index] - xMean) ** 2;
   }
   return denominator > 0 ? numerator / denominator : 0;
+}
+
+function sequenceSlope(values) {
+  const points = values
+    .map((value, index) => ({ t: index * 1000, p: value }))
+    .filter((point) => Number.isFinite(point.p));
+  return round(linearSlope(points));
 }
 
 function summarizePoints(points) {
@@ -262,8 +275,22 @@ function recoveryToPreholdMs(points, releaseMs, sessionEndMs, preholdPitch, thre
   if (!Number.isFinite(preholdPitch)) return null;
   const tolerance = Math.max(0.5, thresholdDeg);
   const recovery = pointsBetween(points, releaseMs, sessionEndMs);
-  const first = recovery.find((point) => Math.abs(point.p - preholdPitch) <= tolerance);
-  return first ? round(first.t - releaseMs, 1) : null;
+  let candidateStart = null;
+  let previousT = null;
+  for (const point of recovery) {
+    const sensorGap = previousT != null && point.t - previousT > LAB_P0_ALGORITHM.params.longGapMs;
+    const inside = Math.abs(point.p - preholdPitch) <= tolerance;
+    if (!inside || sensorGap) {
+      candidateStart = inside ? point.t : null;
+    } else {
+      candidateStart ??= point.t;
+      if (point.t - candidateStart >= LAB_P0_ALGORITHM.params.recoveryDwellMs) {
+        return round(candidateStart - releaseMs, 1);
+      }
+    }
+    previousT = point.t;
+  }
+  return null;
 }
 
 function analyzeHold(points, events, holdStartEvent, fallbackIndex, totalHolds, baseline) {
@@ -348,6 +375,7 @@ function analyzeHold(points, events, holdStartEvent, fallbackIndex, totalHolds, 
     prehold,
     direction,
     rawExcursionDeg: round(rawExcursion),
+    relativeExcursionDeg: round(rawExcursion == null ? null : Math.abs(rawExcursion)),
     freshInhaleExcursionAtHoldStartDeg: round(freshInhaleExcursion),
     freshInhaleEvidence,
     inhalePeakExcursionDeg: round(peak?.excursionDeg),
@@ -417,7 +445,7 @@ function longestStableOnTargetRun(
   return round(longestMs / 1000);
 }
 
-function sessionSummary(holds, points, requestedHoldSeconds) {
+function sessionSummary(holds, points, requestedHoldSeconds, events) {
   const validHolds = holds.filter(
     (hold) => hold.valid && hold.bestStableSegment && hold.prehold,
   );
@@ -461,8 +489,8 @@ function sessionSummary(holds, points, requestedHoldSeconds) {
           ),
         )
       : null;
-  const targetPitch = learnHolds.length >= 3 ? mean(learnPlateaus) : null;
-  const targetExcursion = learnHolds.length >= 3 ? mean(learnExcursions) : null;
+  const targetPitch = learnHolds.length >= 3 ? median(learnPlateaus) : null;
+  const targetExcursion = learnHolds.length >= 3 ? median(learnExcursions) : null;
   const practice = validHolds
     .filter((hold) => hold.role === "practice")
     .map((hold) => {
@@ -479,6 +507,18 @@ function sessionSummary(holds, points, requestedHoldSeconds) {
         targetExcursion,
         trainingTolerance,
       );
+      const coachingEvents = events.filter(
+        (event) =>
+          event.type === "coach_cue" && Number(event?.meta?.holdIndex) === hold.index,
+      );
+      const correctionEvents = coachingEvents.filter((event) =>
+        ["go_deeper", "ease_back"].includes(event?.meta?.cue),
+      );
+      const targetAcquired = events.find(
+        (event) =>
+          event.type === "target_acquired" && Number(event?.meta?.holdIndex) === hold.index,
+      );
+      const inhaleStartMs = hold.windows?.inhaleStartMs;
       return {
         index: hold.index,
         absoluteTargetErrorDeg: round(
@@ -498,8 +538,39 @@ function sessionSummary(holds, points, requestedHoldSeconds) {
           longestOnTargetRunSec == null || !Number.isFinite(requestedHoldSeconds)
             ? null
             : longestOnTargetRunSec >= requestedHoldSeconds,
+        targetAcquiredFromInhaleSec:
+          targetAcquired && Number.isFinite(inhaleStartMs)
+            ? round((targetAcquired.t - inhaleStartMs) / 1000)
+            : null,
+        coachingCueCount: coachingEvents.length,
+        correctionCueCount: correctionEvents.length,
+        coachingCues: coachingEvents.map((event) => ({
+          t: round(event.t, 1),
+          cue: event?.meta?.cue ?? null,
+          reason: event?.meta?.reason ?? null,
+          measuredExcursionDeg: round(Number(event?.meta?.measuredExcursionDeg)),
+        })),
       };
     });
+
+  const recoveryCompletedCount = validHolds.filter(
+    (hold) => hold.recoveryToPreholdMs != null,
+  ).length;
+  const sequenceTrend = {
+    interpretation: "descriptive_only_not_a_fatigue_diagnosis",
+    preholdVariabilitySlopeDegPerHold: sequenceSlope(
+      validHolds.map((hold) => hold.prehold.sdDeg),
+    ),
+    relativeExcursionSlopeDegPerHold: sequenceSlope(signedExcursions),
+    timeToStableSlopeSecPerHold: sequenceSlope(
+      validHolds.map((hold) => hold.firstLockFromHoldStartSec),
+    ),
+    stableDurationSlopeSecPerHold: sequenceSlope(
+      validHolds.map((hold) => hold.bestStableSegment.durationSec),
+    ),
+    recoveryCompletedCount,
+    recoveryObservedHoldCount: validHolds.length,
+  };
 
   return {
     totalHoldCount: holds.length,
@@ -519,13 +590,16 @@ function sessionSummary(holds, points, requestedHoldSeconds) {
     learnedTarget: {
       available: learnHolds.length >= 3,
       learnHoldCount: learnHolds.length,
+      method: "median_relative_excursion",
       targetPitchDeg: round(targetPitch),
+      targetPitchUse: "diagnostic_only",
       targetSignedExcursionDeg: round(targetExcursion),
       observedLearnPlateauSdDeg: round(standardDeviation(learnPlateaus)),
       observedLearnExcursionSdDeg: round(standardDeviation(learnExcursions)),
       experimentalTrainingToleranceDeg: round(trainingTolerance),
     },
     practice,
+    sequenceTrend,
   };
 }
 
@@ -547,7 +621,7 @@ export function analyzeLabRecording(recording) {
     typeof recording.protocol?.holdSeconds === "number"
       ? recording.protocol.holdSeconds
       : null;
-  const summary = sessionSummary(holds, points, requestedHoldSeconds);
+  const summary = sessionSummary(holds, points, requestedHoldSeconds, events);
   const issues = [];
   const quality = sampleQuality(recording, points);
   if ((quality.effectiveSampleRateHz ?? 0) < 20) issues.push("low_sample_rate");

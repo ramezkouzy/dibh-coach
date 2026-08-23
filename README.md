@@ -7,7 +7,7 @@ through three short phases, and receives quantitative feedback on the
 **reproducibility** of their hold across attempts.
 
 Live: <https://dibh-coach.vercel.app>
-Lab (P0 measurement harness): <https://dibh-coach.vercel.app/lab>
+Lab (P0 measurement harness): <https://dibh-coach-lab-p0.vercel.app/lab>
 TTS generator: <https://dibh-coach.vercel.app/tts-generator.html>
 
 ---
@@ -178,18 +178,26 @@ SD percentiles, ASCII traces, and answers the question "would the current
 algorithm have classified this hold as stable" — used heavily during
 threshold tuning.
 
-The current `dibh-lab/v3` guided harness records 1, 3, or 5 repeated holds,
-including a quiet prehold anchor for every attempt. It stores all 13 hardware
-channels plus EMA pitch, exact phase markers, versioned detector parameters,
-stable-segment boundaries, and separate metrics for phone-pose consistency,
-absolute plateau consistency, and breath-excursion consistency.
+The current `dibh-lab/v3` guided harness is hands-free after Start. It records
+3 calibration holds or 3 calibration plus 2 practice holds, including a quiet
+prehold anchor for every attempt. The first three valid relative excursions set
+a fixed session target by robust median. Practice attempts receive audio cues
+to reach and maintain that target. A new attempt begins only after the selected
+minimum recovery and a stable relaxed-position anchor.
+
+The export stores all 13 hardware channels plus EMA pitch, exact phase and
+coaching markers, versioned detector parameters, stable-segment boundaries,
+and separate metrics for phone-pose consistency, absolute plateau consistency,
+and phone-measured abdominal-excursion consistency. These are training proxies,
+not measurements of lung volume or treatment suitability.
 
 ```bash
 pnpm lab:p0:check
 ```
 
-The synthetic check verifies that the P0 analyzer is deterministic and works
-when inhalation moves pitch in either direction.
+The synthetic check verifies that the P0 analyzer is deterministic, works when
+inhalation moves pitch in either direction, and preserves the learned relative
+target even when absolute resting phone pose shifts between attempts.
 
 ### Analyzing a self-test session export
 

@@ -55,7 +55,7 @@
   <body>
     <h1>DIBH Coach — TTS Generator</h1>
     <p class="dim">
-      One-shot generator for the 18 coaching clips. Sign in to Puter (free), pick a voice,
+      One-shot generator for the coaching clips. Sign in to Puter (free), pick a voice,
       pick the <code>public/audio/</code> folder, click Generate. Files land directly in place.
     </p>
 
@@ -96,7 +96,7 @@
         <span id="folderName" class="dim">no folder picked</span>
       </div>
       <div class="row" style="margin-top:0.75rem;">
-        <button id="generate" disabled>Generate all 18 clips</button>
+        <button id="generate" disabled>Generate all clips</button>
         <button class="secondary" id="downloadAll" style="display:none;">Download as fallback (Safari)</button>
       </div>
       <ul class="log" id="log"></ul>
@@ -106,12 +106,15 @@
       Tip: in Chrome/Edge use <em>Pick folder</em> → navigate to the repo's
       <code>public/audio/</code>. The browser will prompt to allow writes; accept.
       In Safari, the folder picker isn't available — use <em>Download as fallback</em> and
-      drag the 18 files into the folder yourself.
+      drag the generated files into the folder yourself.
     </p>
 
     <script>
       const PHRASES = {
         baseline_intro: "Breathe normally for twenty seconds.",
+        placement_countdown: "Place the phone on your belly. The session begins in five seconds.",
+        baseline_intro_12: "Breathe normally and relax while I learn your resting movement.",
+        prepare_anchor: "Take a normal breath in, breathe out, and relax.",
         baseline_low_data: "Not enough data. Let's try again.",
         baseline_no_breath: "I could not see your breathing. Place the phone on your belly and try again.",
         baseline_too_much: "There was too much movement. Let's try again.",
@@ -128,6 +131,7 @@
         learn_got_one: "Good. Two more like that.",
         learn_got_two: "One more comfortable hold.",
         learn_target_locked: "Target locked. Let's match it.",
+        calibration_incomplete: "I could not learn a reliable target from those holds. Session complete.",
         go_deeper: "A little deeper.",
         ease_back: "Ease back a touch.",
         right_there: "Right there. Hold steady.",

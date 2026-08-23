@@ -7,6 +7,9 @@
 export const PHRASES = {
   // calibrate
   baseline_intro: "Breathe normally for twenty seconds.",
+  placement_countdown: "Place the phone on your belly. The session begins in five seconds.",
+  baseline_intro_12: "Breathe normally and relax while I learn your resting movement.",
+  prepare_anchor: "Take a normal breath in, breathe out, and relax.",
   baseline_low_data: "Not enough data. Let's try again.",
   baseline_no_breath: "I could not see your breathing. Place the phone on your belly and try again.",
   baseline_too_much: "There was too much movement. Let's try again.",
@@ -27,6 +30,7 @@ export const PHRASES = {
   learn_got_one: "Good. Two more like that.",
   learn_got_two: "One more comfortable hold.",
   learn_target_locked: "Target locked. Let's match it.",
+  calibration_incomplete: "I could not learn a reliable target from those holds. Session complete.",
 
   // practice phase — position-match cues
   go_deeper: "A little deeper.",
@@ -51,6 +55,15 @@ export const PHRASES = {
 } as const;
 
 export type PhraseKey = keyof typeof PHRASES;
+
+// These new Lab-only prompts do not have checked-in MP3s yet. Speak them
+// directly instead of waiting for a predictable 404 before falling back.
+const WEB_SPEECH_ONLY = new Set<PhraseKey>([
+  "placement_countdown",
+  "baseline_intro_12",
+  "prepare_anchor",
+  "calibration_incomplete",
+]);
 
 let cache: Partial<Record<PhraseKey, HTMLAudioElement>> = {};
 let currentlyPlaying: HTMLAudioElement | null = null;
@@ -97,6 +110,10 @@ export function playClip(key: PhraseKey) {
       // ignore
     }
   }
+  if (WEB_SPEECH_ONLY.has(key)) {
+    fallbackSpeak(PHRASES[key]);
+    return;
+  }
   let audio = cache[key];
   if (!audio) {
     audio = new Audio(`/audio/${key}.mp3`);
@@ -122,6 +139,7 @@ export function playClip(key: PhraseKey) {
 export function preloadAll() {
   if (typeof window === "undefined") return;
   for (const key of Object.keys(PHRASES) as PhraseKey[]) {
+    if (WEB_SPEECH_ONLY.has(key)) continue;
     if (!cache[key]) {
       const a = new Audio(`/audio/${key}.mp3`);
       a.preload = "auto";
