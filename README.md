@@ -181,10 +181,11 @@ threshold tuning.
 The current `dibh-lab/v3` guided harness is hands-free after Start. One short
 rehearsal teaches REST, READY, INHALE, HOLD, and RELEASE before measurement.
 The harness then searches up to six calibration attempts for three matching
-holds and runs up to four attempts to collect two successful coached practice
-holds. Every attempt captures a quiet relative anchor immediately before the
-READY prompt. The tightest consistent calibration trio sets a fixed session
-target by robust median. During calibration and practice, an RPM-style live
+holds and collects a selectable 2, 5, 8, or 10 successful coached practice
+holds, allowing twice as many attempts as the selected goal. Every attempt
+captures a quiet relative anchor immediately before the READY prompt. The
+tightest consistent calibration trio sets a fixed session target by robust
+median. During calibration and practice, an RPM-style live
 breathing curve and blue position bar are shown against the same green target
 range. The 15-second curve keeps running through RELEASE and recovery so a
 therapist looking at the participant's phone can see inspiration rise,
@@ -200,7 +201,9 @@ Lab P0 uses a dedicated prerecorded prompt set and awaits each MP3 before the
 next instruction, with a bounded timeout so audio cannot freeze the runner.
 Audio is activated inside the motion and Start taps on mobile, and a Test voice
 control confirms playback before the run. If the opening prompt fails, the run
-stops instead of continuing silently.
+stops instead of continuing silently. All cues reuse that same activated audio
+element for iPhone reliability. A 10-second hold includes a spoken five-second
+remaining cue, and entering the target band plays a dedicated two-note ding.
 JSON exports record phase transitions plus prompt start/end
 events, allowing the trace view to align spoken instructions with measured
 inhale, hold, release, and recovery motion.

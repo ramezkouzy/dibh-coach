@@ -1,6 +1,6 @@
 export const LAB_P0_ALGORITHM = Object.freeze({
   id: "dibh-lab-p0",
-  version: "0.3.0",
+  version: "0.4.0",
   params: Object.freeze({
     emaAlpha: 0.3,
     stabilityWindowMs: 2000,
@@ -11,9 +11,9 @@ export const LAB_P0_ALGORITHM = Object.freeze({
     stableDebounceMs: 1000,
     driftDebounceMs: 1500,
     plateauTrimMs: 300,
-    trainingToleranceFloorDeg: 0.5,
-    trainingToleranceCeilingDeg: 2,
-    trainingToleranceNoiseMultiplier: 2,
+    trainingToleranceFloorDeg: 1,
+    trainingToleranceCeilingDeg: 2.5,
+    trainingToleranceNoiseMultiplier: 3,
     calibrationExcursionSdCeilingDeg: 0.75,
     minimumTargetExcursionDeg: 1.5,
     restingWindowMs: 2000,

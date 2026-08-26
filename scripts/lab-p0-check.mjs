@@ -105,6 +105,11 @@ for (const direction of [-1, 1]) {
   assert.ok(first.summary.signedExcursionSdDeg < 0.2);
   assert.equal(first.summary.learnedTarget.available, true);
   assert.ok(Math.abs(first.summary.learnedTarget.targetSignedExcursionDeg - 8) < 0.1);
+  assert.equal(
+    first.summary.learnedTarget.experimentalTrainingToleranceDeg,
+    1,
+    "P0.6 should use the wider one-degree minimum half-window",
+  );
   assert.equal(first.summary.practice.length, 2);
   for (const practice of first.summary.practice) {
     assert.ok(practice.longestStableOnTargetRunSec > 6);

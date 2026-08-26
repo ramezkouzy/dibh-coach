@@ -49,8 +49,9 @@ type LabEvent = { t: number; type: string; meta?: Record<string, unknown> };
 
 type GuidedConfig = {
   holdSeconds: number;
-  holdCount: number;
+  practiceHoldCount: number;
   recoverySeconds: number;
+  initialDirection: -1 | 1;
 };
 
 type LearnedTarget = {
@@ -92,6 +93,7 @@ type Recording = {
     targetAcquisitionSeconds: number | null;
     recoverySeconds: number | null;
     handsFree: boolean;
+    phonePlacement: "charging_port_toward_face" | null;
     targetMethod: "median_relative_excursion" | null;
   };
   samples: Sample[];
@@ -172,7 +174,7 @@ const GUIDED_JOURNEY: Array<{
   {
     id: "practice",
     title: "5. Practice",
-    detail: "Place blue in green and hold.",
+    detail: "Repeat blue-in-green holds.",
     data: "Acquisition, drift, corrections, duration",
   },
   {
@@ -208,6 +210,7 @@ export default function LabPage() {
   const [guidedLabel, setGuidedLabel] = useState<string>("");
   const [guidedHoldSec, setGuidedHoldSec] = useState<number>(10);
   const [guidedRecoverySec, setGuidedRecoverySec] = useState<number>(20);
+  const [guidedPracticeGoal, setGuidedPracticeGoal] = useState<number>(8);
   const [stepCountdown, setStepCountdown] = useState<number>(0);
   const [liveGate, setLiveGate] = useState<LiveGate | null>(null);
   const [audioStatus, setAudioStatus] = useState<"ready" | "testing" | "error" | null>(null);
@@ -469,7 +472,7 @@ export default function LabPage() {
     const recordingBase = {
       schema: "dibh-lab/v3" as const,
       sessionId: sessionIdRef.current,
-      appBuild: "lab-p0.5",
+      appBuild: "lab-p0.6",
       algorithm: LAB_P0_ALGORITHM,
       scenario: activeScenarioRef.current,
       note,
@@ -480,14 +483,15 @@ export default function LabPage() {
         mode: guidedConfig ? ("guided" as const) : ("free" as const),
         rehearsal: Boolean(guidedConfig),
         holdSeconds: guidedConfig?.holdSeconds ?? null,
-        holdCount: guidedConfig?.holdCount ?? null,
-        learnHoldCount: guidedConfig ? Math.min(3, guidedConfig.holdCount) : null,
+        holdCount: guidedConfig ? 3 + guidedConfig.practiceHoldCount : null,
+        learnHoldCount: guidedConfig ? 3 : null,
         calibrationAttemptLimit: guidedConfig ? 6 : null,
-        practiceHoldCount: guidedConfig ? Math.max(0, guidedConfig.holdCount - 3) : null,
-        practiceAttemptLimit: guidedConfig ? 4 : null,
+        practiceHoldCount: guidedConfig?.practiceHoldCount ?? null,
+        practiceAttemptLimit: guidedConfig ? Math.max(4, guidedConfig.practiceHoldCount * 2) : null,
         targetAcquisitionSeconds: guidedConfig ? 5 : null,
         recoverySeconds: guidedConfig?.recoverySeconds ?? null,
         handsFree: Boolean(guidedConfig),
+        phonePlacement: guidedConfig ? "charging_port_toward_face" as const : null,
         targetMethod: guidedConfig ? ("median_relative_excursion" as const) : null,
       },
       samples: samplesRef.current,
@@ -531,6 +535,30 @@ export default function LabPage() {
 
   const waitGuidedSeconds = async (seconds: number, label: string) => {
     await waitUntil(performance.now() + seconds * 1000, label);
+  };
+
+  const waitThroughTimedHold = async (
+    holdStartedAt: number,
+    seconds: number,
+    label: string,
+    meta: Record<string, unknown>,
+  ) => {
+    const deadline = holdStartedAt + seconds * 1000;
+    let fiveSecondsAnnounced = seconds <= 5;
+    setGuidedLabel(label);
+    while (guidedRunningRef.current && performance.now() < deadline) {
+      const now = performance.now();
+      setStepCountdown(Math.max(1, Math.ceil((deadline - now) / 1000)));
+      if (!fiveSecondsAnnounced && now >= deadline - 5000) {
+        fiveSecondsAnnounced = true;
+        await coach("p0_five_seconds_left", {
+          ...meta,
+          reason: "five_seconds_remaining",
+        });
+      }
+      await sleep(150);
+    }
+    setStepCountdown(0);
   };
 
   const waitForRestAnchor = async (
@@ -625,10 +653,10 @@ export default function LabPage() {
     return {
       direction: Number.isFinite(analysis.summary.learnedDirection)
         ? (analysis.summary.learnedDirection as number)
-        : 1,
+        : (guidedConfigRef.current?.initialDirection ?? -1),
       target,
       tolerance:
-        target == null ? null : Math.min(1.25, Math.max(0.75, target * 0.2)),
+        target == null ? null : Math.min(2, Math.max(1.25, target * 0.35)),
       candidateCount: candidates.length,
     };
   };
@@ -662,7 +690,7 @@ export default function LabPage() {
             targetExcursionDeg: target.excursionDeg,
             toleranceDeg: target.toleranceDeg,
           });
-          await coach("p0_target", {
+          await coach("p0_in_range_ding", {
             ...meta,
             reason: "target_acquired",
             measuredExcursionDeg: roundClient(excursion),
@@ -706,10 +734,19 @@ export default function LabPage() {
     let wasInBand: boolean | null = null;
     let outOfBandSince: number | null = null;
     let correctionIssued = false;
-    setGuidedLabel(`HOLD • Practice ${meta.practiceNumber} of 2`);
+    let fiveSecondsAnnounced = seconds <= 5;
+    const practiceGoal = guidedConfigRef.current?.practiceHoldCount ?? 2;
+    setGuidedLabel(`HOLD • Practice ${meta.practiceNumber} of ${practiceGoal}`);
     while (guidedRunningRef.current && performance.now() < deadline) {
       const now = performance.now();
       setStepCountdown(Math.max(1, Math.ceil((deadline - now) / 1000)));
+      if (!fiveSecondsAnnounced && now >= deadline - 5000) {
+        fiveSecondsAnnounced = true;
+        await coach("p0_five_seconds_left", {
+          ...meta,
+          reason: "five_seconds_remaining",
+        });
+      }
       const currentPitch = oRef.current.betaEma ?? oRef.current.beta;
       if (currentPitch != null) {
         const excursion = target.direction * (currentPitch - anchorPitch);
@@ -766,18 +803,22 @@ export default function LabPage() {
       return;
     }
     if (recording) return;
-    const sc = `p0-3cal-2practice-${guidedHoldSec}s`;
+    const sc = `p0-3cal-${guidedPracticeGoal}practice-${guidedHoldSec}s`;
     const config = {
       holdSeconds: guidedHoldSec,
-      holdCount: 5,
+      practiceHoldCount: guidedPracticeGoal,
       recoverySeconds: guidedRecoverySec,
+      initialDirection: -1 as const,
     };
     startRec(sc, config);
     setGuidedActive(true);
     guidedRunningRef.current = true;
     try {
       enterGuidedStage("setup");
-      enterGuidedPhase("setup", "SETUP • Place phone flat on your belly");
+      enterGuidedPhase(
+        "setup",
+        "SETUP • Phone flat on belly, charging port toward the face",
+      );
       const introResult = await coach("p0_session_intro", { phase: "setup" });
       if (introResult !== "ended") {
         mark("session_end", { outcome: "audio_unavailable", introResult });
@@ -840,7 +881,7 @@ export default function LabPage() {
         };
         const anchorPitch = await waitForRestAnchor(
           meta,
-          previousReleaseAt == null ? 8 : config.recoverySeconds,
+          config.recoverySeconds,
           previousReleaseAt ?? performance.now(),
           previousReleaseAt == null,
         );
@@ -886,7 +927,7 @@ export default function LabPage() {
               excursionDeg: provisional.target,
               toleranceDeg: provisional.tolerance,
             },
-            inhaleAt + 5000,
+            performance.now() + 5000,
           );
         } else {
           await waitUntil(inhaleAt + 4000, `INHALE • Calibration ${calibrationNumber} of 3`);
@@ -909,9 +950,11 @@ export default function LabPage() {
         const calibrationHoldAt = performance.now();
         mark("hold_start", meta);
         await coach(holdCueForSeconds(config.holdSeconds), meta);
-        await waitUntil(
-          calibrationHoldAt + config.holdSeconds * 1000,
+        await waitThroughTimedHold(
+          calibrationHoldAt,
+          config.holdSeconds,
           `HOLD • Calibration ${calibrationNumber} of 3`,
+          meta,
         );
         mark("release", meta);
         previousReleaseAt = performance.now();
@@ -996,14 +1039,17 @@ export default function LabPage() {
         selectedHoldIndexes: learned.selectedHoldIndexes,
       });
       enterGuidedStage("practice");
-      enterGuidedPhase("practice", "PRACTICE • Two coached holds");
+      enterGuidedPhase(
+        "practice",
+        `PRACTICE • Collect ${config.practiceHoldCount} coached holds`,
+      );
       await coach("p0_practice_intro", { phase: "practice" });
 
       let completedPracticeCount = 0;
       let practiceAttemptCount = 0;
-      const maximumPracticeAttempts = 4;
+      const maximumPracticeAttempts = Math.max(4, config.practiceHoldCount * 2);
       while (
-        completedPracticeCount < 2 &&
+        completedPracticeCount < config.practiceHoldCount &&
         practiceAttemptCount < maximumPracticeAttempts &&
         guidedRunningRef.current
       ) {
@@ -1039,17 +1085,20 @@ export default function LabPage() {
           direction: learnedTargetRef.current.direction,
           targetExcursionDeg: learnedTargetRef.current.excursionDeg,
           toleranceDeg: learnedTargetRef.current.toleranceDeg,
-          label: `Practice ${practiceNumber} of 2 • place the blue bar in green`,
+          label: `Practice ${practiceNumber} of ${config.practiceHoldCount} • place the blue bar in green`,
         });
-        enterGuidedPhase("inhale", `INHALE • Practice ${practiceNumber} of 2`, meta);
+        enterGuidedPhase(
+          "inhale",
+          `INHALE • Practice ${practiceNumber} of ${config.practiceHoldCount}`,
+          meta,
+        );
         mark("inhale_start", meta);
-        const practiceInhaleAt = performance.now();
         await coach("p0_inhale", meta);
         const acquired = await acquirePracticeTarget(
           meta,
           anchorPitch,
           learnedTargetRef.current,
-          practiceInhaleAt + 5000,
+          performance.now() + 5000,
         );
         if (!acquired) {
           mark("practice_attempt_aborted", { ...meta, reason: "target_not_acquired" });
@@ -1061,7 +1110,11 @@ export default function LabPage() {
           nextHoldIndex += 1;
           continue;
         }
-        enterGuidedPhase("hold", `HOLD • Practice ${practiceNumber} of 2`, meta);
+        enterGuidedPhase(
+          "hold",
+          `HOLD • Practice ${practiceNumber} of ${config.practiceHoldCount}`,
+          meta,
+        );
         const practiceHoldAt = performance.now();
         mark("hold_start", {
           ...meta,
@@ -1101,14 +1154,17 @@ export default function LabPage() {
         mark("recovery_end", previousMeta);
         enterGuidedStage("complete");
         setLiveGate(null);
-        if (completedPracticeCount === 2) {
-          enterGuidedPhase("complete", "COMPLETE • Two practice holds collected");
+        if (completedPracticeCount === config.practiceHoldCount) {
+          enterGuidedPhase(
+            "complete",
+            `COMPLETE • ${config.practiceHoldCount} practice holds collected`,
+          );
           mark("session_end", { outcome: "practice_complete" });
           await coach("p0_session_complete", { phase: "complete" });
         } else {
           enterGuidedPhase(
             "complete",
-            `COMPLETE • ${completedPracticeCount} of 2 practice holds collected`,
+            `COMPLETE • ${completedPracticeCount} of ${config.practiceHoldCount} practice holds collected`,
           );
           mark("session_end", {
             outcome: "practice_incomplete",
@@ -1191,7 +1247,7 @@ export default function LabPage() {
               className="rounded px-1.5 py-0.5 text-[9px] uppercase tracking-wider"
               style={{ background: "#0c2d48", color: "#7dd3fc", border: "1px solid #0369a1" }}
             >
-              v0.5
+              v0.6
             </span>
           </h1>
           <a href="/" className="text-xs underline opacity-70">
@@ -1200,8 +1256,8 @@ export default function LabPage() {
         </div>
         <p className="text-xs opacity-70 leading-relaxed">
           One rehearsal teaches the sequence, three matching calibration holds learn a
-          comfortable relative target, and two coached practice holds test how well it can
-          be reproduced.
+          comfortable relative target, and an extended coached practice run collects
+          repeated breathing cycles.
         </p>
 
         {!granted ? (
@@ -1227,10 +1283,10 @@ export default function LabPage() {
               <div className="flex items-center justify-between gap-3">
                 <div className="text-xs uppercase tracking-wider opacity-60">P0 guided run</div>
                 <div className="text-[10px] uppercase tracking-wider" style={{ color: "#38bdf8" }}>
-                  rehearsal → 3 calibration → 2 practice
+                  rehearsal → 3 calibration → {guidedPracticeGoal} practice
                 </div>
               </div>
-              <GuidedJourney stage={guidedStage} />
+              <GuidedJourney stage={guidedStage} practiceGoal={guidedPracticeGoal} />
               <div
                 className="rounded-md p-2 flex items-center justify-between gap-3"
                 style={{
@@ -1251,7 +1307,7 @@ export default function LabPage() {
                   <div className="opacity-60">
                     {audioStatus === "error"
                       ? "Turn up media volume, then tap Test voice again."
-                      : "You should hear “Inhale now.”"}
+                      : "You should hear “Take a deep breath in and hold.”"}
                   </div>
                 </div>
                 <button
@@ -1288,6 +1344,23 @@ export default function LabPage() {
                     <option key={n} value={n}>{n}s minimum rest</option>
                   ))}
                 </select>
+                <select
+                  value={guidedPracticeGoal}
+                  onChange={(e) => setGuidedPracticeGoal(parseInt(e.target.value))}
+                  disabled={recording}
+                  className="col-span-2 rounded p-2 text-xs"
+                  style={{ background: "#0a0c10", color: "#e7e5e4", border: "1px solid #303441" }}
+                >
+                  {[2, 5, 8, 10].map((n) => (
+                    <option key={n} value={n}>
+                      {n} practice holds for data collection
+                    </option>
+                  ))}
+                </select>
+              </div>
+              <div className="text-[11px] leading-relaxed opacity-70">
+                Phone placement: flat on the belly with the charging port pointing toward
+                the patient&apos;s face. This makes inhale rise on both live displays.
               </div>
               {!guidedActive ? (
                 <button
@@ -1528,7 +1601,13 @@ export default function LabPage() {
   );
 }
 
-function GuidedJourney({ stage }: { stage: GuidedStage }) {
+function GuidedJourney({
+  stage,
+  practiceGoal,
+}: {
+  stage: GuidedStage;
+  practiceGoal: number;
+}) {
   const currentIndex = GUIDED_JOURNEY.findIndex((item) => item.id === stage);
   const current = currentIndex >= 0 ? GUIDED_JOURNEY[currentIndex] : null;
   return (
@@ -1548,7 +1627,11 @@ function GuidedJourney({ stage }: { stage: GuidedStage }) {
               }}
             >
               <div className="text-[10px] font-semibold uppercase tracking-wide">{item.title}</div>
-              <div className="mt-1 text-[9px] leading-tight opacity-70">{item.detail}</div>
+              <div className="mt-1 text-[9px] leading-tight opacity-70">
+                {item.id === "practice"
+                  ? `Collect ${practiceGoal} blue-in-green holds.`
+                  : item.detail}
+              </div>
             </div>
           );
         })}
@@ -1556,7 +1639,7 @@ function GuidedJourney({ stage }: { stage: GuidedStage }) {
       <div className="mt-2 text-[10px] leading-relaxed" style={{ color: current ? "#bae6fd" : "#a8a29e" }}>
         {current
           ? `Collecting now: ${current.data}.`
-          : "Journey: setup → rehearsal → baseline → three matching calibrations → two successful practices → review."}
+          : `Journey: setup → rehearsal → baseline → three matching calibrations → ${practiceGoal} successful practices → review.`}
       </div>
     </div>
   );

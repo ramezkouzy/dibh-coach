@@ -715,6 +715,8 @@ function promptLabel(event: TraceEvent) {
     p0_hold_12: "HOLD 12s",
     p0_hold_15: "HOLD 15s",
     p0_hold_20: "HOLD 20s",
+    p0_five_seconds_left: "5 SECONDS LEFT",
+    p0_in_range_ding: "IN RANGE DING",
     p0_release: "RELEASE",
     p0_abort: "ABORT / RELEASE",
     p0_deeper: "DEEPER",

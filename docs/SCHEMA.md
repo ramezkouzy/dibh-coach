@@ -110,19 +110,19 @@ per-phase reports work uniformly across both.
 `dibh-lab/v3` preserves the v2 raw channels, adds `betaEma`, and embeds a
 versioned deterministic analysis. A guided run is hands-free after Start and
 contains one unscored rehearsal, the tightest consistent trio found within up
-to six Learn-style calibration attempts, and two successful audio-guided
-Practice-style checks against the fixed learned target. Practice may use up to
-four attempts; acquisition or sustained-drift failures abort to RELEASE and
-retry rather than becoming scored holds.
+to six Learn-style calibration attempts, and a selectable 2, 5, 8, or 10
+successful audio-guided Practice-style checks against the fixed learned target.
+Practice may use up to twice the selected goal; acquisition or sustained-drift
+failures abort to RELEASE and retry rather than becoming scored holds.
 
 ```json
 {
   "schema": "dibh-lab/v3",
   "sessionId": "33d87e61-79ee-45c7-9543-7c8d5e4e7405",
-  "appBuild": "lab-p0.5",
+  "appBuild": "lab-p0.6",
   "algorithm": {
     "id": "dibh-lab-p0",
-    "version": "0.3.0",
+    "version": "0.4.0",
     "params": {
       "emaAlpha": 0.3,
       "stabilityWindowMs": 2000,
@@ -134,14 +134,15 @@ retry rather than becoming scored holds.
     "mode": "guided",
     "rehearsal": true,
     "holdSeconds": 10,
-    "holdCount": 5,
+    "holdCount": 11,
     "learnHoldCount": 3,
     "calibrationAttemptLimit": 6,
-    "practiceHoldCount": 2,
-    "practiceAttemptLimit": 4,
+    "practiceHoldCount": 8,
+    "practiceAttemptLimit": 16,
     "targetAcquisitionSeconds": 5,
     "recoverySeconds": 20,
     "handsFree": true,
+    "phonePlacement": "charging_port_toward_face",
     "targetMethod": "median_relative_excursion"
   },
   "channels": [
@@ -210,7 +211,7 @@ anchor before the hold began. A hold is flagged when it does not show at least
 1.5 degrees of new movement in its learned direction; this makes a phone that
 was already near the target distinguishable from a new inhalation.
 
-The two successful Practice holds also report absolute and excursion target
+The successful Practice holds also report absolute and excursion target
 error, target-acquisition time, whether their plateau falls inside the
 experimental band, their longest continuous stable-and-on-target run, whether
 that run reached the selected duration, and the audio guidance issued. If three
@@ -232,7 +233,7 @@ make the complete instruction and measurement flow replayable.
 
 The embedded target band is explicitly named
 `experimentalTrainingToleranceDeg`. It is derived from typical within-hold
-noise and clamped to 0.5–2.0 degrees; inconsistent Learn holds do not
+noise and clamped to 1.0–2.5 degrees; inconsistent Learn holds do not
 automatically widen it. It is a detector-development value, not a clinically
 validated RT tolerance.
 

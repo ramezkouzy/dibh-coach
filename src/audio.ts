@@ -7,21 +7,23 @@
 export const PHRASES = {
   // Lab P0 protocol — one self-contained, prerecorded prompt set.
   p0_session_intro:
-    "We will do one rehearsal, three calibration holds, and two coached practice holds. Follow rest, inhale, hold, and release.",
+    "This is a hands-free breathing run. Listen for rest, deep breath in and hold, five seconds left, and release.",
   p0_rehearsal_intro: "First, one short rehearsal so you can learn the sequence.",
   p0_calibration_intro:
     "Calibration begins. Complete three comfortable deep breaths and hold each one steady.",
-  p0_practice_intro: "Calibration complete. Now match that breath depth for two practice holds.",
-  p0_rest: "Rest. Breathe normally.",
-  p0_ready: "Get ready. Your next deep breath starts in five seconds.",
-  p0_inhale: "Inhale now.",
+  p0_practice_intro: "Calibration complete. Now repeat that breath depth for the practice holds.",
+  p0_rest: "Rest and breathe normally.",
+  p0_ready: "Keep breathing normally. In five seconds, take a deep breath in and hold.",
+  p0_inhale: "Take a deep breath in and hold.",
   p0_hold: "Hold now.",
-  p0_hold_8: "Hold for eight seconds. Watch the countdown.",
-  p0_hold_10: "Hold for ten seconds. Watch the countdown.",
-  p0_hold_12: "Hold for twelve seconds. Watch the countdown.",
-  p0_hold_15: "Hold for fifteen seconds. Watch the countdown.",
-  p0_hold_20: "Hold for twenty seconds. Watch the countdown.",
-  p0_release: "Release. Breathe normally.",
+  p0_hold_8: "Eight-second hold starts now.",
+  p0_hold_10: "Ten-second hold starts now.",
+  p0_hold_12: "Twelve-second hold starts now.",
+  p0_hold_15: "Fifteen-second hold starts now.",
+  p0_hold_20: "Twenty-second hold starts now.",
+  p0_five_seconds_left: "Five seconds left.",
+  p0_in_range_ding: "Target range tone.",
+  p0_release: "Release and breathe normally.",
   p0_abort: "Outside the target range. Release and breathe normally. We will try again.",
   p0_deeper: "Breathe in a little more.",
   p0_ease_back: "Ease back slightly.",
@@ -87,7 +89,10 @@ export const PHRASES = {
 export type PhraseKey = keyof typeof PHRASES;
 export type AudioPlaybackResult = "ended" | "interrupted" | "failed" | "timed_out";
 
-let cache: Partial<Record<PhraseKey, HTMLAudioElement>> = {};
+// iOS is much more reliable when every prompt reuses the media element that
+// was activated by the user's Test voice or Start tap. Creating one element
+// per cue caused later hands-free prompts to fail even when the MP3s existed.
+let sharedAudio: HTMLAudioElement | null = null;
 let unlocked = false;
 let playGeneration = 0;
 let activePlayback:
@@ -142,21 +147,20 @@ export function playClip(key: PhraseKey): Promise<AudioPlaybackResult> {
   if (typeof window === "undefined") return Promise.resolve("failed");
   const generation = ++playGeneration;
   stopAudio();
-  let audio = cache[key];
+  let audio = sharedAudio;
   if (!audio) {
-    audio = new Audio(`/audio/${key}.mp3`);
+    audio = new Audio();
     audio.preload = "auto";
     audio.setAttribute("playsinline", "");
-    cache[key] = audio;
+    sharedAudio = audio;
   }
   audio.muted = false;
   audio.volume = 1;
-  audio.currentTime = 0;
+  audio.src = `/audio/${key}.mp3`;
+  audio.load();
   return new Promise((resolve) => {
     let settled = false;
-    const timeoutMs = Number.isFinite(audio.duration)
-      ? Math.max(5000, audio.duration * 1000 + 2500)
-      : 15000;
+    const timeoutMs = 20000;
     const timeoutId = window.setTimeout(() => {
       try {
         audio.pause();
@@ -164,7 +168,6 @@ export function playClip(key: PhraseKey): Promise<AudioPlaybackResult> {
       } catch {
         // best-effort
       }
-      if (cache[key] === audio) delete cache[key];
       finish("timed_out");
     }, timeoutMs);
     const finish = (result: AudioPlaybackResult) => {
@@ -177,10 +180,7 @@ export function playClip(key: PhraseKey): Promise<AudioPlaybackResult> {
       resolve(result);
     };
     const onEnded = () => finish("ended");
-    const onError = () => {
-      if (cache[key] === audio) delete cache[key];
-      finish("failed");
-    };
+    const onError = () => finish("failed");
     audio.addEventListener("ended", onEnded, { once: true });
     audio.addEventListener("error", onError, { once: true });
     activePlayback = { audio, finish };
@@ -189,20 +189,18 @@ export function playClip(key: PhraseKey): Promise<AudioPlaybackResult> {
         finish("interrupted");
         return;
       }
-      if (cache[key] === audio) delete cache[key];
       finish("failed");
     });
   });
 }
 
-// Preload all clips. Call once after audio is unlocked. Best-effort.
+// Prepare the one reusable media element. Individual files load on demand so
+// iOS does not create dozens of separately gated audio elements.
 export function preloadAll() {
   if (typeof window === "undefined") return;
-  for (const key of Object.keys(PHRASES) as PhraseKey[]) {
-    if (!cache[key]) {
-      const a = new Audio(`/audio/${key}.mp3`);
-      a.preload = "auto";
-      cache[key] = a;
-    }
+  if (!sharedAudio) {
+    sharedAudio = new Audio();
+    sharedAudio.preload = "auto";
+    sharedAudio.setAttribute("playsinline", "");
   }
 }

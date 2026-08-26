@@ -195,7 +195,11 @@ Practice uses an acquire-then-hold state machine. The blue bar must remain in
 the green band for 750 ms within a five-second acquisition window. Acquisition
 failure releases immediately. During the timed hold, sustained out-of-band
 motion receives one directional cue; failure to return aborts and restarts the
-attempt. The runner collects two successful holds within four attempts.
+attempt. The runner collects a selectable 2, 5, 8, or 10 successful holds and
+allows twice that number of attempts. With the charging port toward the face,
+negative raw pitch movement is normalized upward for inhale. The practice band
+uses a 1.0-degree minimum half-width, three times measured within-hold noise,
+and a 2.5-degree maximum half-width.
 
 ---
 
@@ -208,10 +212,13 @@ a different voice (Vranich, etc.) is a file-swap.
 
 Playback is serialized through a single active `<audio>` element. Lab P0
 awaits each clip's `ended` event before advancing, while an explicit cancel or
-higher-priority cue can stop the active clip. A duration-aware timeout prevents
-a missing browser `ended` event from freezing the protocol. On iOS, audio is unlocked by a
-`requestPermission`-coupled gesture on the Welcome screen — without that,
-non-interactive playback is blocked.
+playback error ends the active prompt. The same user-activated media element is
+reused for every hands-free cue on iPhone. Timed holds announce five seconds
+remaining, and target acquisition plays a dedicated two-note ding.
+A higher-priority cue can stop the active clip. A bounded timeout
+prevents a missing browser `ended` event from freezing the protocol. On iOS,
+audio is unlocked by a `requestPermission`-coupled gesture on the Welcome
+screen — without that, non-interactive playback is blocked.
 
 Lab P0 has a dedicated, consistently voiced set for REST, READY, INHALE, HOLD,
 RELEASE, calibration, practice, correction, retry, and completion prompts.
