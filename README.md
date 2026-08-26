@@ -185,7 +185,10 @@ holds and runs up to four attempts to collect two successful coached practice
 holds. Every attempt captures a quiet relative anchor immediately before the
 READY prompt. The tightest consistent calibration trio sets a fixed session
 target by robust median. During calibration and practice, an RPM-style live
-blue position bar is shown against the green target range.
+breathing curve and blue position bar are shown against the same green target
+range. The 15-second curve keeps running through RELEASE and recovery so a
+therapist looking at the participant's phone can see inspiration rise,
+expiration fall, and the held plateau in real time.
 
 Practice must acquire the range within five seconds. A sustained drift gets
 one correction; if the user cannot return, the attempt aborts to RELEASE and
@@ -195,6 +198,9 @@ visible countdown begins when HOLD is called.
 
 Lab P0 uses a dedicated prerecorded prompt set and awaits each MP3 before the
 next instruction, with a bounded timeout so audio cannot freeze the runner.
+Audio is activated inside the motion and Start taps on mobile, and a Test voice
+control confirms playback before the run. If the opening prompt fails, the run
+stops instead of continuing silently.
 JSON exports record phase transitions plus prompt start/end
 events, allowing the trace view to align spoken instructions with measured
 inhale, hold, release, and recovery motion.

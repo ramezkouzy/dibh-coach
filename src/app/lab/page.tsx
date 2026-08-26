@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useRef, useState, useCallback } from "react";
-import { playClip, preloadAll, stopAudio, unlockAudio } from "@/audio";
+import { playClip, stopAudio, unlockAudio } from "@/audio";
 import { analyzeLabRecording, LAB_P0_ALGORITHM } from "@/lib/lab-p0-analysis.mjs";
 import LabTrace, { type TraceRecording } from "./LabTrace";
 
@@ -210,6 +210,7 @@ export default function LabPage() {
   const [guidedRecoverySec, setGuidedRecoverySec] = useState<number>(20);
   const [stepCountdown, setStepCountdown] = useState<number>(0);
   const [liveGate, setLiveGate] = useState<LiveGate | null>(null);
+  const [audioStatus, setAudioStatus] = useState<"ready" | "testing" | "error" | null>(null);
 
   // ---- refs ---------------------------------------------------------------
   const samplesRef = useRef<Sample[]>([]);
@@ -372,6 +373,8 @@ export default function LabPage() {
   // ---- permission ---------------------------------------------------------
   const requestPerm = useCallback(async () => {
     setPermissionError(null);
+    // Run before either permission await so iOS sees it inside the tap.
+    unlockAudio();
     const Doc = (typeof DeviceOrientationEvent !== "undefined" ? DeviceOrientationEvent : null) as
       | (typeof DeviceOrientationEvent & { requestPermission?: () => Promise<"granted" | "denied"> })
       | null;
@@ -397,8 +400,6 @@ export default function LabPage() {
         // non-fatal
       }
     }
-    unlockAudio();
-    preloadAll();
     setGranted(true);
   }, []);
 
@@ -447,7 +448,16 @@ export default function LabPage() {
     mark("coach_cue", { ...meta, cue });
     const result = await playClip(cue);
     mark("coach_cue_end", { ...meta, cue, result });
+    if (result === "ended") setAudioStatus("ready");
+    if (result === "failed" || result === "timed_out") setAudioStatus("error");
     return result;
+  };
+
+  const testVoice = async () => {
+    setAudioStatus("testing");
+    unlockAudio();
+    const result = await playClip("p0_inhale");
+    setAudioStatus(result === "ended" ? "ready" : "error");
   };
 
   const stopRec = () => {
@@ -459,7 +469,7 @@ export default function LabPage() {
     const recordingBase = {
       schema: "dibh-lab/v3" as const,
       sessionId: sessionIdRef.current,
-      appBuild: "lab-p0.4",
+      appBuild: "lab-p0.5",
       algorithm: LAB_P0_ALGORITHM,
       scenario: activeScenarioRef.current,
       note,
@@ -749,6 +759,8 @@ export default function LabPage() {
   };
 
   const startGuided = async () => {
+    // Keep audio activation in the Start button's user gesture on mobile.
+    unlockAudio();
     if (!granted) {
       await requestPerm();
       return;
@@ -766,7 +778,12 @@ export default function LabPage() {
     try {
       enterGuidedStage("setup");
       enterGuidedPhase("setup", "SETUP • Place phone flat on your belly");
-      await coach("p0_session_intro", { phase: "setup" });
+      const introResult = await coach("p0_session_intro", { phase: "setup" });
+      if (introResult !== "ended") {
+        mark("session_end", { outcome: "audio_unavailable", introResult });
+        setGuidedLabel("AUDIO UNAVAILABLE • Tap Test voice, then restart");
+        return;
+      }
       await waitGuidedSeconds(3, "SETUP • Place phone flat on your belly");
 
       enterGuidedStage("rehearsal");
@@ -880,7 +897,6 @@ export default function LabPage() {
           previousReleaseAt = performance.now();
           enterGuidedPhase("release", "RELEASE • Reset and try again", meta);
           await coach("p0_abort", meta);
-          setLiveGate(null);
           previousMeta = meta;
           nextHoldIndex += 1;
           continue;
@@ -901,7 +917,6 @@ export default function LabPage() {
         previousReleaseAt = performance.now();
         enterGuidedPhase("release", "RELEASE • Breathe normally", meta);
         await coach("p0_release", meta);
-        setLiveGate(null);
         previousMeta = meta;
 
         const updatedAnalysis = currentAnalysis();
@@ -1042,7 +1057,6 @@ export default function LabPage() {
           previousReleaseAt = performance.now();
           enterGuidedPhase("release", "RELEASE • Target not acquired", meta);
           await coach("p0_abort", meta);
-          setLiveGate(null);
           previousMeta = meta;
           nextHoldIndex += 1;
           continue;
@@ -1077,7 +1091,6 @@ export default function LabPage() {
           enterGuidedPhase("release", "RELEASE • Outside target range", meta);
           await coach("p0_abort", meta);
         }
-        setLiveGate(null);
         previousMeta = meta;
         nextHoldIndex += 1;
       }
@@ -1178,7 +1191,7 @@ export default function LabPage() {
               className="rounded px-1.5 py-0.5 text-[9px] uppercase tracking-wider"
               style={{ background: "#0c2d48", color: "#7dd3fc", border: "1px solid #0369a1" }}
             >
-              v0.4
+              v0.5
             </span>
           </h1>
           <a href="/" className="text-xs underline opacity-70">
@@ -1218,6 +1231,38 @@ export default function LabPage() {
                 </div>
               </div>
               <GuidedJourney stage={guidedStage} />
+              <div
+                className="rounded-md p-2 flex items-center justify-between gap-3"
+                style={{
+                  background: audioStatus === "error" ? "#2a1010" : "#0a0c10",
+                  border: `1px solid ${audioStatus === "error" ? "#7f1d1d" : "#303441"}`,
+                }}
+              >
+                <div className="text-[11px] leading-relaxed">
+                  <div className="font-semibold">
+                    {audioStatus === "ready"
+                      ? "Voice ready"
+                      : audioStatus === "testing"
+                        ? "Testing voice…"
+                        : audioStatus === "error"
+                          ? "Voice could not play"
+                          : "Check the prerecorded voice first"}
+                  </div>
+                  <div className="opacity-60">
+                    {audioStatus === "error"
+                      ? "Turn up media volume, then tap Test voice again."
+                      : "You should hear “Inhale now.”"}
+                  </div>
+                </div>
+                <button
+                  onClick={testVoice}
+                  disabled={recording || audioStatus === "testing"}
+                  className="rounded-md px-3 py-2 text-xs font-semibold shrink-0 disabled:opacity-40"
+                  style={{ background: "#2563eb", color: "white" }}
+                >
+                  Test voice
+                </button>
+              </div>
               <div className="grid grid-cols-2 gap-2">
                 <select
                   value={guidedHoldSec}
@@ -1527,15 +1572,37 @@ function LiveTargetGate({
   phase: string;
 }) {
   const excursion = gate.direction * (pitch - gate.anchorPitch);
+  const [history, setHistory] = useState<Array<{ t: number; excursion: number }>>([]);
+  useEffect(() => {
+    setHistory([]);
+  }, [gate.anchorPitch, gate.direction]);
+  useEffect(() => {
+    const now = performance.now();
+    setHistory((previous) => [
+      ...previous.filter((point) => now - point.t <= 15000),
+      { t: now, excursion },
+    ]);
+  }, [excursion]);
+
   const target = gate.targetExcursionDeg;
   const tolerance = gate.toleranceDeg;
   const hasBand = target != null && tolerance != null;
-  const maximum = Math.max(4, (target ?? Math.max(2, excursion)) + (tolerance ?? 1) * 4);
-  const markerBottom = Math.max(0, Math.min(100, (excursion / maximum) * 100));
+  const observed = history.map((point) => point.excursion);
+  const minimum = Math.min(-1, excursion - 0.5, ...observed);
+  const maximum = Math.max(
+    4,
+    excursion + 0.5,
+    ...observed,
+    (target ?? Math.max(2, excursion)) + (tolerance ?? 1) * 2,
+  );
+  const range = Math.max(1, maximum - minimum);
   const bandLow = hasBand ? Math.max(0, target - tolerance) : 0;
   const bandHigh = hasBand ? target + tolerance : 0;
-  const bandBottom = (bandLow / maximum) * 100;
-  const bandHeight = ((bandHigh - bandLow) / maximum) * 100;
+  const barMinimum = Math.min(0, minimum);
+  const barRange = Math.max(1, maximum - barMinimum);
+  const barMarkerBottom = ((excursion - barMinimum) / barRange) * 100;
+  const bandBottom = ((bandLow - barMinimum) / barRange) * 100;
+  const bandHeight = ((bandHigh - bandLow) / barRange) * 100;
   const error = hasBand ? excursion - target : null;
   const inRange = error != null && Math.abs(error) <= (tolerance ?? 0);
   const status = !hasBand
@@ -1547,42 +1614,110 @@ function LiveTargetGate({
       : error! < 0
         ? "BELOW RANGE • inhale a little more"
         : "ABOVE RANGE • ease back slightly";
+  const chartWidth = 320;
+  const chartHeight = 150;
+  const chartPadding = { top: 12, right: 8, bottom: 22, left: 34 };
+  const plotWidth = chartWidth - chartPadding.left - chartPadding.right;
+  const plotHeight = chartHeight - chartPadding.top - chartPadding.bottom;
+  const latestTime = history.at(-1)?.t ?? performance.now();
+  const startTime = latestTime - 15000;
+  const xFor = (time: number) =>
+    chartPadding.left + ((Math.max(startTime, time) - startTime) / 15000) * plotWidth;
+  const yFor = (value: number) =>
+    chartPadding.top + ((maximum - value) / range) * plotHeight;
+  const curvePath = history
+    .filter((point) => point.t >= startTime)
+    .map((point, index) => `${index === 0 ? "M" : "L"}${xFor(point.t).toFixed(1)},${yFor(point.excursion).toFixed(1)}`)
+    .join(" ");
+  const baselineY = yFor(0);
+  const chartBandTop = hasBand ? yFor(bandHigh) : 0;
+  const chartBandBottom = hasBand ? yFor(bandLow) : 0;
   return (
     <div
-      className="rounded-lg p-3 grid grid-cols-[76px_1fr] gap-4 items-center"
+      className="rounded-lg p-3"
       style={{ background: "#071018", border: `1px solid ${inRange ? "#22c55e" : "#303441"}` }}
     >
-      <div className="relative h-48 rounded-md overflow-hidden" style={{ background: "#111827", border: "1px solid #334155" }}>
-        {[25, 50, 75].map((value) => (
-          <div
-            key={value}
-            className="absolute left-0 right-0 border-t"
-            style={{ bottom: `${value}%`, borderColor: "#253044" }}
-          />
-        ))}
-        {hasBand && (
-          <div
-            className="absolute left-1 right-1 rounded"
-            style={{
-              bottom: `${bandBottom}%`,
-              height: `${Math.max(4, bandHeight)}%`,
-              background: "rgba(34,197,94,0.42)",
-              border: "1px solid #4ade80",
-            }}
-          />
-        )}
-        <div
-          className="absolute left-0 right-0 h-1 rounded transition-[bottom] duration-100"
-          style={{ bottom: `calc(${markerBottom}% - 2px)`, background: "#38bdf8", boxShadow: "0 0 8px #38bdf8" }}
-        />
-        <div className="absolute left-1 top-1 text-[8px] opacity-50">INHALE ↑</div>
-        <div className="absolute left-1 bottom-1 text-[8px] opacity-50">REST 0</div>
-      </div>
-      <div>
+      <div className="flex items-start justify-between gap-3">
+        <div>
         <div className="text-[10px] uppercase tracking-wider opacity-60">Live target gate</div>
         <div className="mt-1 text-sm font-semibold" style={{ color: inRange ? "#4ade80" : "#e7e5e4" }}>
           {status}
         </div>
+        </div>
+        <div className="text-right text-[10px] opacity-60">INHALE ↑<br />EXHALE ↓</div>
+      </div>
+      <div className="mt-3 grid grid-cols-1 sm:grid-cols-[1fr_76px] gap-3 items-stretch">
+        <div className="rounded-md overflow-hidden" style={{ background: "#111827", border: "1px solid #334155" }}>
+          <div className="px-2 pt-2 text-[9px] uppercase tracking-wider opacity-55">
+            Breathing curve • latest 15 seconds
+          </div>
+          <svg
+            viewBox={`0 0 ${chartWidth} ${chartHeight}`}
+            className="block w-full h-auto"
+            role="img"
+            aria-label="Live breathing curve. Inspiration rises, expiration falls, and the green area is the target hold range."
+          >
+            {[0.25, 0.5, 0.75].map((fraction) => (
+              <line
+                key={fraction}
+                x1={chartPadding.left}
+                x2={chartWidth - chartPadding.right}
+                y1={chartPadding.top + plotHeight * fraction}
+                y2={chartPadding.top + plotHeight * fraction}
+                stroke="#253044"
+                strokeWidth="1"
+              />
+            ))}
+            {hasBand && (
+              <rect
+                x={chartPadding.left}
+                y={chartBandTop}
+                width={plotWidth}
+                height={Math.max(4, chartBandBottom - chartBandTop)}
+                rx="3"
+                fill="rgba(34,197,94,0.32)"
+                stroke="#4ade80"
+              />
+            )}
+            <line
+              x1={chartPadding.left}
+              x2={chartWidth - chartPadding.right}
+              y1={baselineY}
+              y2={baselineY}
+              stroke="#94a3b8"
+              strokeWidth="1"
+            />
+            {curvePath && <path d={curvePath} fill="none" stroke="#38bdf8" strokeWidth="3" strokeLinejoin="round" strokeLinecap="round" />}
+            <text x="3" y={Math.max(12, yFor(maximum) + 5)} fill="#94a3b8" fontSize="9">{maximum.toFixed(1)}°</text>
+            <text x="12" y={Math.min(chartHeight - 23, baselineY + 3)} fill="#94a3b8" fontSize="9">0°</text>
+            <text x={chartPadding.left} y={chartHeight - 6} fill="#94a3b8" fontSize="9">−15s</text>
+            <text x={chartWidth - chartPadding.right - 18} y={chartHeight - 6} fill="#94a3b8" fontSize="9">now</text>
+          </svg>
+        </div>
+        <div className="relative min-h-48 rounded-md overflow-hidden" style={{ background: "#111827", border: "1px solid #334155" }}>
+          {[25, 50, 75].map((value) => (
+            <div key={value} className="absolute left-0 right-0 border-t" style={{ bottom: `${value}%`, borderColor: "#253044" }} />
+          ))}
+          {hasBand && (
+            <div
+              className="absolute left-1 right-1 rounded"
+              style={{
+                bottom: `${bandBottom}%`,
+                height: `${Math.max(4, bandHeight)}%`,
+                background: "rgba(34,197,94,0.42)",
+                border: "1px solid #4ade80",
+              }}
+            />
+          )}
+          <div
+            className="absolute left-0 right-0 h-1 rounded transition-[bottom] duration-100"
+            style={{ bottom: `calc(${Math.max(0, Math.min(100, barMarkerBottom))}% - 2px)`, background: "#38bdf8", boxShadow: "0 0 8px #38bdf8" }}
+          />
+          <div className="absolute left-1 top-1 text-[8px] opacity-50">INHALE ↑</div>
+          <div className="absolute left-1 bottom-1 text-[8px] opacity-50">EXHALE ↓</div>
+        </div>
+      </div>
+      <div>
         <div className="mt-3 grid grid-cols-2 gap-2 text-[10px]">
           <MiniStat label="blue bar" value={`${excursion.toFixed(2)}°`} />
           <MiniStat

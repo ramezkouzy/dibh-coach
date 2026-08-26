@@ -119,7 +119,7 @@ retry rather than becoming scored holds.
 {
   "schema": "dibh-lab/v3",
   "sessionId": "33d87e61-79ee-45c7-9543-7c8d5e4e7405",
-  "appBuild": "lab-p0.4",
+  "appBuild": "lab-p0.5",
   "algorithm": {
     "id": "dibh-lab-p0",
     "version": "0.3.0",

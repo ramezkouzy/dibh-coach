@@ -102,13 +102,25 @@ let activePlayback:
 // first non-interactive playClip().
 export function unlockAudio() {
   if (unlocked || typeof window === "undefined") return;
-  unlocked = true;
-  // Pre-construct an audio element and play+pause it during the gesture.
+  // Resume Web Audio while we are still inside the user's tap. Do not mark
+  // audio as unlocked until the browser confirms it: iOS can reject an unlock
+  // that happens after an awaited motion-permission prompt.
   try {
-    const a = new Audio();
-    a.muted = true;
-    a.play().catch(() => {});
-    a.pause();
+    const AudioContextClass = window.AudioContext ??
+      (window as typeof window & { webkitAudioContext?: typeof AudioContext }).webkitAudioContext;
+    if (!AudioContextClass) return;
+    const context = new AudioContextClass();
+    void context.resume().then(() => {
+      const source = context.createBufferSource();
+      source.buffer = context.createBuffer(1, 1, 22050);
+      source.connect(context.destination);
+      source.start(0);
+      unlocked = context.state === "running";
+      window.setTimeout(() => void context.close(), 50);
+    }).catch(() => {
+      unlocked = false;
+      void context.close();
+    });
   } catch {
     // best-effort
   }
@@ -134,8 +146,11 @@ export function playClip(key: PhraseKey): Promise<AudioPlaybackResult> {
   if (!audio) {
     audio = new Audio(`/audio/${key}.mp3`);
     audio.preload = "auto";
+    audio.setAttribute("playsinline", "");
     cache[key] = audio;
   }
+  audio.muted = false;
+  audio.volume = 1;
   audio.currentTime = 0;
   return new Promise((resolve) => {
     let settled = false;
@@ -149,6 +164,7 @@ export function playClip(key: PhraseKey): Promise<AudioPlaybackResult> {
       } catch {
         // best-effort
       }
+      if (cache[key] === audio) delete cache[key];
       finish("timed_out");
     }, timeoutMs);
     const finish = (result: AudioPlaybackResult) => {
@@ -161,7 +177,10 @@ export function playClip(key: PhraseKey): Promise<AudioPlaybackResult> {
       resolve(result);
     };
     const onEnded = () => finish("ended");
-    const onError = () => finish("failed");
+    const onError = () => {
+      if (cache[key] === audio) delete cache[key];
+      finish("failed");
+    };
     audio.addEventListener("ended", onEnded, { once: true });
     audio.addEventListener("error", onError, { once: true });
     activePlayback = { audio, finish };
@@ -170,6 +189,7 @@ export function playClip(key: PhraseKey): Promise<AudioPlaybackResult> {
         finish("interrupted");
         return;
       }
+      if (cache[key] === audio) delete cache[key];
       finish("failed");
     });
   });
