@@ -218,6 +218,42 @@ amplitude-to-noise ratio among sufficiently long recordings is labeled the
 strongest measured signal. This is a phone-position signal-quality comparison,
 not a lung-volume or clinical-treatment measurement.
 
+### Distributed Lab contributions
+
+The Lab uses a three-screen contributor flow: **Choose → Record → Results**.
+The start screen contains the how-to, a non-identifying participant code, an
+optional site/group code and run label, a data acknowledgement, and three clear
+recording choices: Guided calibration, Position study, and Free record. Only the
+selected recorder is shown while collecting data. Once recording stops, setup
+controls are hidden and the page shows the trace results, a post-run notes field,
+and delivery actions.
+
+Every new `dibh-lab/v3` JSON includes contributor codes plus browser-accessible
+device metadata: user-agent/platform, language and time zone, screen and viewport
+dimensions, pixel ratio, screen orientation, touch points, hardware concurrency,
+and device memory when the browser exposes it. Mobile browsers do not reliably
+expose an exact phone model. Do not use participant names, dates of birth, email
+addresses, or personal health information in contributor fields or notes.
+
+The preferred delivery path is `POST /api/lab-submissions`. It validates the Lab
+recording, adds a server receipt timestamp and SHA-256 checksum, writes the JSON
+to a **private Vercel Blob store**, and returns a submission ID. JSON download and
+the phone share sheet remain available as backups. The legacy `/api/log` endpoint
+only writes to runtime logs and is not durable study storage.
+
+To enable central collection in Vercel:
+
+1. Open the linked `dibh-coach` project, create a **private Blob store**, and
+   connect it to Production. Vercel supplies `BLOB_READ_WRITE_TOKEN`.
+2. Optionally add `DIBH_LAB_ACCESS_CODE` as a Production environment variable
+   and give that shared code only to invited contributors.
+3. Redeploy. The Lab start screen will change from **JSON backup mode** to
+   **Central upload ready**, and each successful upload will show a receipt ID.
+
+Server uploads are capped at 4 MB so they stay below Vercel Function request
+limits. If guided traces exceed that size in future, migrate this route to the
+Vercel Blob client-upload flow.
+
 Lab P0 uses a dedicated prerecorded prompt set and serializes each MP3 before the
 next instruction, with a bounded timeout so audio cannot freeze the runner.
 Audio is activated inside the motion and Start taps on mobile, and a Test voice

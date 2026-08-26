@@ -136,7 +136,37 @@ type PositionStudy = {
 type PositionRun = PositionStudy & {
   sessionId: string;
   recordedAt: string;
+  participantCode: string;
 };
+
+type ContributorMetadata = {
+  participantCode: string;
+  siteCode: string | null;
+  runLabel: string | null;
+};
+
+type DeviceMetadata = {
+  capturedAt: string;
+  userAgent: string;
+  platform: string | null;
+  language: string | null;
+  timeZone: string | null;
+  viewport: { width: number; height: number };
+  screen: { width: number; height: number; colorDepth: number };
+  pixelRatio: number;
+  orientation: string | null;
+  touchPoints: number | null;
+  hardwareConcurrency: number | null;
+  deviceMemoryGb: number | null;
+};
+
+type LabMode = "guided" | "free" | "position-study";
+type LabView = "home" | "run" | "results";
+type SubmissionState =
+  | { status: "idle" }
+  | { status: "submitting" }
+  | { status: "success"; id: string }
+  | { status: "error"; message: string };
 
 type Recording = {
   schema: "dibh-lab/v3";
@@ -168,6 +198,8 @@ type Recording = {
     phonePlacement: "charging_port_toward_face" | null;
     targetMethod: "local_three_peak_delta_mean_combined_sd" | "median_relative_excursion" | null;
   };
+  contributor: ContributorMetadata;
+  device: DeviceMetadata;
   positionStudy: PositionStudy | null;
   samples: Sample[];
   events: LabEvent[];
@@ -282,6 +314,15 @@ export default function LabPage() {
   const [positionTraceAnchorPitch, setPositionTraceAnchorPitch] = useState<number | null>(null);
   const [positionTraceSessionStart, setPositionTraceSessionStart] = useState<number | null>(null);
   const [positionRuns, setPositionRuns] = useState<PositionRun[]>([]);
+  const [labView, setLabView] = useState<LabView>("home");
+  const [selectedMode, setSelectedMode] = useState<LabMode>("guided");
+  const [participantCode, setParticipantCode] = useState("");
+  const [siteCode, setSiteCode] = useState("");
+  const [runLabel, setRunLabel] = useState("");
+  const [studyAccessCode, setStudyAccessCode] = useState("");
+  const [dataAcknowledged, setDataAcknowledged] = useState(false);
+  const [submissionState, setSubmissionState] = useState<SubmissionState>({ status: "idle" });
+  const [centralCollection, setCentralCollection] = useState<"checking" | "ready" | "unavailable">("checking");
 
   // ---- guided runner state -----------------------------------------------
   const [guidedActive, setGuidedActive] = useState(false);
@@ -308,6 +349,7 @@ export default function LabPage() {
   const guidedConfigRef = useRef<GuidedConfig | null>(null);
   const positionStudyRef = useRef<Omit<PositionStudy, "analysis"> | null>(null);
   const positionTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const deviceMetadataRef = useRef<DeviceMetadata | null>(null);
   const learnedTargetRef = useRef<LearnedTarget | null>(null);
   const betaEmaRef = useRef<number | null>(null);
   // Latest values from each event stream — combined on each tick.
@@ -348,6 +390,21 @@ export default function LabPage() {
 
   useEffect(() => () => {
     if (positionTimerRef.current) clearTimeout(positionTimerRef.current);
+  }, []);
+
+  useEffect(() => {
+    let cancelled = false;
+    fetch("/api/lab-submissions", { cache: "no-store" })
+      .then((response) => response.json())
+      .then((result: { configured?: boolean }) => {
+        if (!cancelled) setCentralCollection(result.configured ? "ready" : "unavailable");
+      })
+      .catch(() => {
+        if (!cancelled) setCentralCollection("unavailable");
+      });
+    return () => {
+      cancelled = true;
+    };
   }, []);
 
   // ---- wake lock so the phone doesn't sleep during a recording ----------
@@ -477,11 +534,11 @@ export default function LabPage() {
         const r = await Doc.requestPermission();
         if (r !== "granted") {
           setPermissionError("Motion access denied.");
-          return;
+          return false;
         }
       } catch {
         setPermissionError("Couldn't request orientation permission.");
-        return;
+        return false;
       }
     }
     if (Mot && typeof Mot.requestPermission === "function") {
@@ -492,7 +549,19 @@ export default function LabPage() {
       }
     }
     setGranted(true);
+    return true;
   }, []);
+
+  const openLabMode = async (mode: LabMode) => {
+    const hasPermission = granted || await requestPerm();
+    if (!hasPermission) return;
+    setSelectedMode(mode);
+    if (mode === "free") setFreeMode("standard");
+    if (mode === "position-study") setFreeMode("position-study");
+    setImported(null);
+    setSubmissionState({ status: "idle" });
+    setLabView("run");
+  };
 
   // ---- recording control --------------------------------------------------
   const startRec = (
@@ -508,6 +577,7 @@ export default function LabPage() {
     activeScenarioRef.current =
       sc ?? (scenario === "custom" && customScenario ? customScenario : scenario);
     guidedConfigRef.current = guidedConfig ?? null;
+    deviceMetadataRef.current = captureDeviceMetadata();
     recordingRef.current = true;
     lastSampleAtRef.current = 0;
     setDuration(0);
@@ -583,7 +653,7 @@ export default function LabPage() {
     const recordingBase = {
       schema: "dibh-lab/v3" as const,
       sessionId: sessionIdRef.current,
-      appBuild: "lab-p0.9",
+      appBuild: "lab-p1.0",
       algorithm: LAB_P0_ALGORITHM,
       scenario: activeScenarioRef.current,
       note,
@@ -619,6 +689,12 @@ export default function LabPage() {
           ? "local_three_peak_delta_mean_combined_sd" as const
           : null,
       },
+      contributor: {
+        participantCode: participantCode.trim(),
+        siteCode: siteCode.trim() || null,
+        runLabel: runLabel.trim() || null,
+      },
+      device: deviceMetadataRef.current ?? captureDeviceMetadata(),
       positionStudy,
       samples: samplesRef.current,
       events: eventsRef.current,
@@ -636,11 +712,13 @@ export default function LabPage() {
           ...positionStudy,
           sessionId: rec.sessionId,
           recordedAt: rec.startedAt,
+          participantCode: rec.contributor.participantCode,
         },
       ]);
     }
     positionStudyRef.current = null;
-    download(rec);
+    setSubmissionState({ status: "idle" });
+    setLabView("results");
   };
 
   const startPositionStudy = () => {
@@ -2157,12 +2235,53 @@ export default function LabPage() {
       } as Recording;
       refreshed.analysis = analyzeLabRecording(refreshed);
       setImported(refreshed);
+      setLabView("results");
     } catch (error) {
       setImportError(error instanceof Error ? error.message : "Could not read this JSON file.");
     }
   };
 
   const displayedRecording = imported ?? last;
+
+  const updateRunNote = (value: string) => {
+    setNote(value);
+    setLast((previous) => previous ? { ...previous, note: value } : previous);
+  };
+
+  const submitLastRecording = async () => {
+    if (!last || submissionState.status === "submitting") return;
+    const recordingToSubmit = { ...last, note };
+    setLast(recordingToSubmit);
+    setSubmissionState({ status: "submitting" });
+    try {
+      const response = await fetch("/api/lab-submissions", {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          ...(studyAccessCode.trim() ? { "x-dibh-study-code": studyAccessCode.trim() } : {}),
+        },
+        body: JSON.stringify(recordingToSubmit),
+      });
+      const result = await response.json() as { ok?: boolean; id?: string; error?: string };
+      if (!response.ok || !result.ok || !result.id) {
+        throw new Error(result.error || "The trace could not be submitted.");
+      }
+      setSubmissionState({ status: "success", id: result.id });
+    } catch (error) {
+      setSubmissionState({
+        status: "error",
+        message: error instanceof Error ? error.message : "The trace could not be submitted.",
+      });
+    }
+  };
+
+  const startAnotherRecording = () => {
+    setImported(null);
+    setNote("");
+    setRunLabel("");
+    setSubmissionState({ status: "idle" });
+    setLabView("home");
+  };
 
   // ---- render -------------------------------------------------------------
   return (
@@ -2184,7 +2303,7 @@ export default function LabPage() {
               className="rounded px-1.5 py-0.5 text-[9px] uppercase tracking-wider"
               style={{ background: "#0c2d48", color: "#7dd3fc", border: "1px solid #0369a1" }}
             >
-              v0.9
+              v1.0
             </span>
           </h1>
           <a href="/" className="text-xs underline opacity-70">
@@ -2192,19 +2311,137 @@ export default function LabPage() {
           </a>
         </div>
         <p className="text-xs opacity-70 leading-relaxed">
-          Three local breathing peaks set each reference. Three 10-second calibration holds
-          learn the target delta and variability; three coached holds then simulate beam gating.
+          {labView === "home"
+            ? "Record a phone-motion breathing trace, review the result, and send one complete data file."
+            : labView === "run"
+              ? "Keep the phone in the selected position until the recording is complete."
+              : "Recording complete. Review the trace, add your notes, then submit or save the JSON."}
         </p>
 
-        {!granted ? (
-          <button
-            onClick={requestPerm}
-            className="rounded-lg py-3 font-semibold"
-            style={{ background: "#3b82f6", color: "white" }}
-          >
-            Enable motion sensors
-          </button>
-        ) : (
+        {labView === "home" && (
+          <>
+            <div className="rounded-lg p-4" style={{ background: "#111827", border: "1px solid #334155" }}>
+              <div className="text-xs uppercase tracking-wider" style={{ color: "#7dd3fc" }}>How to contribute</div>
+              <div className="mt-3 grid grid-cols-1 sm:grid-cols-3 gap-2">
+                {[
+                  ["1", "Identify", "Enter the participant code you were given. Do not enter a name, birth date, or email."],
+                  ["2", "Record", "Choose one run. Follow its placement instructions and keep the phone still."],
+                  ["3", "Send", "Review the trace, add notes, then submit it. Save the JSON as a backup."],
+                ].map(([number, title, detail]) => (
+                  <div key={number} className="rounded-md p-3" style={{ background: "#0a0c10", border: "1px solid #303441" }}>
+                    <div className="text-xs font-semibold"><span style={{ color: "#38bdf8" }}>{number}.</span> {title}</div>
+                    <div className="mt-1 text-[11px] leading-relaxed opacity-70">{detail}</div>
+                  </div>
+                ))}
+              </div>
+            </div>
+
+            <div className="rounded-lg p-4 flex flex-col gap-3" style={{ background: "#1c1f26", border: "1px solid #303441" }}>
+              <div>
+                <div className="text-xs uppercase tracking-wider opacity-60">Recording information</div>
+                <div className="mt-1 text-[11px] opacity-65">These fields will be included in every JSON trace you record during this visit.</div>
+              </div>
+              <label className="text-[11px] opacity-75 flex flex-col gap-1">
+                Participant code <span style={{ color: "#fda4af" }}>(required)</span>
+                <input
+                  value={participantCode}
+                  onChange={(event) => setParticipantCode(event.target.value)}
+                  maxLength={48}
+                  autoCapitalize="none"
+                  placeholder="Example: SITE01-P004"
+                  className="rounded p-2.5 text-sm"
+                  style={{ background: "#0a0c10", color: "#e7e5e4", border: "1px solid #303441" }}
+                />
+              </label>
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                <label className="text-[11px] opacity-75 flex flex-col gap-1">
+                  Site or group code (optional)
+                  <input
+                    value={siteCode}
+                    onChange={(event) => setSiteCode(event.target.value)}
+                    maxLength={48}
+                    placeholder="Example: HOUSTON"
+                    className="rounded p-2.5 text-sm"
+                    style={{ background: "#0a0c10", color: "#e7e5e4", border: "1px solid #303441" }}
+                  />
+                </label>
+                <label className="text-[11px] opacity-75 flex flex-col gap-1">
+                  Run label (optional)
+                  <input
+                    value={runLabel}
+                    onChange={(event) => setRunLabel(event.target.value)}
+                    maxLength={80}
+                    placeholder="Example: phone on upper abdomen"
+                    className="rounded p-2.5 text-sm"
+                    style={{ background: "#0a0c10", color: "#e7e5e4", border: "1px solid #303441" }}
+                  />
+                </label>
+              </div>
+              {centralCollection === "ready" && (
+                <label className="text-[11px] opacity-75 flex flex-col gap-1">
+                  Study access code (if your coordinator provided one)
+                  <input
+                    type="password"
+                    value={studyAccessCode}
+                    onChange={(event) => setStudyAccessCode(event.target.value)}
+                    maxLength={80}
+                    autoComplete="off"
+                    className="rounded p-2.5 text-sm"
+                    style={{ background: "#0a0c10", color: "#e7e5e4", border: "1px solid #303441" }}
+                  />
+                </label>
+              )}
+              <label className="flex items-start gap-2 rounded-md p-2.5 text-[11px] leading-relaxed" style={{ background: "#0a0c10", border: "1px solid #303441" }}>
+                <input
+                  type="checkbox"
+                  checked={dataAcknowledged}
+                  onChange={(event) => setDataAcknowledged(event.target.checked)}
+                  className="mt-0.5"
+                />
+                <span>
+                  I understand that the trace will contain the participant code, my notes,
+                  phone motion readings, and non-identifying browser/device characteristics.
+                  I will not enter personal health information in these fields.
+                </span>
+              </label>
+            </div>
+
+            <div className="rounded-lg p-4 flex flex-col gap-3" style={{ background: "#1c1f26", border: "1px solid #303441" }}>
+              <div className="flex items-start justify-between gap-3">
+                <div>
+                  <div className="text-xs uppercase tracking-wider opacity-60">Choose a recording</div>
+                  <div className="mt-1 text-[11px] opacity-65">Motion permission is requested after you choose.</div>
+                </div>
+                <span className="text-[10px]" style={{ color: centralCollection === "ready" ? "#86efac" : "#fdba74" }}>
+                  {centralCollection === "checking" ? "Checking upload…" : centralCollection === "ready" ? "Central upload ready" : "JSON backup mode"}
+                </span>
+              </div>
+              <div className="grid grid-cols-1 sm:grid-cols-3 gap-2">
+                {([
+                  ["guided", "Guided calibration", "Three calibration holds followed by coached target holds.", "#16a34a"],
+                  ["position-study", "Position study", "Compare normal-breathing signal at different body locations.", "#0ea5e9"],
+                  ["free", "Free record", "Record an open-ended trace and add event markers manually.", "#dc2626"],
+                ] as const).map(([mode, title, detail, color]) => (
+                  <button
+                    key={mode}
+                    onClick={() => void openLabMode(mode)}
+                    disabled={!participantCode.trim() || !dataAcknowledged}
+                    className="rounded-lg p-3 text-left disabled:opacity-35"
+                    style={{ background: "#0a0c10", border: "1px solid #303441" }}
+                  >
+                    <span className="block text-sm font-semibold" style={{ color }}>{title}</span>
+                    <span className="block mt-1 text-[10px] leading-relaxed opacity-65">{detail}</span>
+                  </button>
+                ))}
+              </div>
+              {(!participantCode.trim() || !dataAcknowledged) && (
+                <div className="text-[10px] opacity-55">Enter a participant code and check the data acknowledgement to continue.</div>
+              )}
+            </div>
+          </>
+        )}
+
+        {labView === "run" && granted && (
           <>
             <div className="grid grid-cols-2 gap-2">
               <Stat label="pitch (β)" value={`${pitch.toFixed(2)}°`} />
@@ -2212,15 +2449,21 @@ export default function LabPage() {
             </div>
 
             {/* Guided session card */}
-            <div
+            {selectedMode === "guided" && <div
               className="rounded-lg p-3 flex flex-col gap-2"
               style={{ background: "#1c1f26", border: "1px solid #303441" }}
             >
               <div className="flex items-center justify-between gap-3">
                 <div className="text-xs uppercase tracking-wider opacity-60">P0 guided run</div>
-                <div className="text-[10px] uppercase tracking-wider" style={{ color: "#38bdf8" }}>
-                  3 breaths → calibrate ×3 → coach ×3
-                </div>
+                {!guidedActive ? (
+                  <button onClick={() => setLabView("home")} className="text-[10px] underline opacity-60">
+                    change recording
+                  </button>
+                ) : (
+                  <div className="text-[10px] uppercase tracking-wider" style={{ color: "#38bdf8" }}>
+                    3 breaths → calibrate ×3 → coach ×3
+                  </div>
+                )}
               </div>
               <GuidedJourney stage={guidedStage} />
               {traceAnchorPitch != null && traceSessionStart != null && (
@@ -2309,36 +2552,24 @@ export default function LabPage() {
                 only inside the green band. Two unsuccessful corrections return the patient
                 to three fresh breathing cycles before retrying.
               </div>
-            </div>
+            </div>}
 
             {/* Free record */}
-            <div
+            {selectedMode !== "guided" && <div
               className="rounded-lg p-3 flex flex-col gap-2"
               style={{ background: "#1c1f26", border: "1px solid #303441" }}
             >
               <div className="flex items-center justify-between gap-3">
-                <div className="text-xs uppercase tracking-wider opacity-60">Free record</div>
-                <div className="text-[10px] opacity-60">separate from guided calibration</div>
-              </div>
-              <div className="grid grid-cols-2 gap-1 rounded-md p-1" style={{ background: "#0a0c10" }}>
-                {([
-                  ["standard", "Standard"],
-                  ["position-study", "Position study"],
-                ] as const).map(([mode, label]) => (
-                  <button
-                    key={mode}
-                    onClick={() => setFreeMode(mode)}
-                    disabled={recording}
-                    className="rounded py-2 text-xs font-semibold disabled:opacity-40"
-                    style={{
-                      background: freeMode === mode ? "#0c2d48" : "transparent",
-                      color: freeMode === mode ? "#7dd3fc" : "#a8a29e",
-                      border: freeMode === mode ? "1px solid #0369a1" : "1px solid transparent",
-                    }}
-                  >
-                    {label}
-                  </button>
-                ))}
+                <div className="text-xs uppercase tracking-wider opacity-60">
+                  {selectedMode === "position-study" ? "Position study" : "Free record"}
+                </div>
+                <button
+                  onClick={() => setLabView("home")}
+                  disabled={recording}
+                  className="text-[10px] underline opacity-60 disabled:opacity-25"
+                >
+                  change recording
+                </button>
               </div>
 
               {freeMode === "standard" ? (
@@ -2464,14 +2695,6 @@ export default function LabPage() {
                 </>
               )}
 
-              <input
-                placeholder="note (optional)"
-                value={note}
-                onChange={(e) => setNote(e.target.value)}
-                disabled={recording}
-                className="rounded p-2 text-sm"
-                style={{ background: "#0a0c10", color: "#e7e5e4", border: "1px solid #303441" }}
-              />
               {!recording ? (
                 <button
                   onClick={() => {
@@ -2499,7 +2722,7 @@ export default function LabPage() {
                 >
                   {freeMode === "position-study"
                     ? `■ Finish & analyze · ${Math.max(0, Math.ceil(positionDurationSec - duration))}s left`
-                    : "■ Stop & download"}
+                    : "■ Finish & review"}
                 </button>
               )}
               {freeMode === "position-study" && positionTraceAnchorPitch != null && positionTraceSessionStart != null && (
@@ -2528,103 +2751,8 @@ export default function LabPage() {
                   ))}
                 </div>
               )}
-            </div>
+            </div>}
 
-            {positionRuns.length > 0 && !recording && (
-              <PositionStudyComparison runs={positionRuns} />
-            )}
-
-            {/* Events list */}
-            {events.length > 0 && (
-              <div
-                className="text-xs leading-relaxed max-h-40 overflow-auto rounded-md p-2 opacity-80"
-                style={{ background: "#0a0c10", border: "1px solid #1c1f26" }}
-              >
-                {events.map((e, i) => (
-                  <div key={i} className="flex justify-between font-mono">
-                    <span>{(e.t / 1000).toFixed(2)}s</span>
-                    <span>{e.type}</span>
-                  </div>
-                ))}
-              </div>
-            )}
-
-            {last && !recording && !guidedActive && (
-              <div
-                className="rounded-md p-3 text-xs"
-                style={{ background: "#1c1f26", border: "1px solid #303441" }}
-              >
-                <div className="font-semibold mb-1">Last download</div>
-                <div className="opacity-80">scenario: {last.scenario}</div>
-                <div className="opacity-80">
-                  {last.durationSec}s · {last.samples.length} samples · {last.events.length} events
-                </div>
-                {last.positionStudy && (
-                  <div className="mt-2 rounded p-2 leading-relaxed" style={{ background: "#071018", color: "#bae6fd", border: "1px solid #164e63" }}>
-                    Position study: {last.positionStudy.locationLabel} · {last.positionStudy.alignment}
-                    <br />
-                    {last.positionStudy.analysis.usableCycleCount} usable cycles · {last.positionStudy.analysis.medianPeakToTroughAmplitudeDeg ?? "—"}° amplitude · {last.positionStudy.analysis.amplitudeToNoiseRatio ?? "—"}× signal/noise
-                  </div>
-                )}
-                <div className="mt-2 grid grid-cols-2 gap-1.5">
-                  <MiniStat
-                    label="sample rate"
-                    value={`${last.analysis.quality.effectiveSampleRateHz ?? "—"} Hz`}
-                  />
-                  <MiniStat
-                    label="longest gap"
-                    value={`${last.analysis.quality.longestGapMs ?? "—"} ms`}
-                  />
-                  <MiniStat
-                    label="baseline SD"
-                    value={`${last.analysis.baseline?.sdDeg ?? "—"}°`}
-                  />
-                  <MiniStat
-                    label="valid holds"
-                    value={`${last.analysis.summary.validHoldCount}/${last.analysis.summary.totalHoldCount}`}
-                  />
-                  <MiniStat
-                    label="target delta"
-                    value={`${last.analysis.summary.learnedTarget.targetSignedExcursionDeg ?? "—"}°`}
-                  />
-                  <MiniStat
-                    label="target half-range"
-                    value={`±${last.analysis.summary.learnedTarget.experimentalTrainingToleranceDeg ?? "—"}°`}
-                  />
-                  <MiniStat
-                    label="pose SD"
-                    value={`${last.analysis.summary.preholdPoseSdDeg ?? "—"}°`}
-                  />
-                  <MiniStat
-                    label="excursion SD"
-                    value={`${last.analysis.summary.signedExcursionSdDeg ?? "—"}°`}
-                  />
-                  <MiniStat
-                    label="plateau SD"
-                    value={`${last.analysis.summary.absolutePlateauSdDeg ?? "—"}°`}
-                  />
-                  <MiniStat
-                    label="direction"
-                    value={`${last.analysis.summary.directionConsistencyPct ?? "—"}%`}
-                  />
-                </div>
-                {last.analysis.issues.length > 0 && (
-                  <div
-                    className="mt-2 rounded p-2 leading-relaxed"
-                    style={{ background: "#3a260f", color: "#fdba74" }}
-                  >
-                    QC: {last.analysis.issues.join(", ")}
-                  </div>
-                )}
-                <button
-                  onClick={() => download(last)}
-                  className="mt-2 rounded px-3 py-1.5 text-xs"
-                  style={{ background: "#0ea5e9", color: "white", border: "none" }}
-                >
-                  Re-download
-                </button>
-              </div>
-            )}
           </>
         )}
 
@@ -2634,46 +2762,127 @@ export default function LabPage() {
           </p>
         )}
 
-        <div
-          className="rounded-lg p-3 flex flex-col gap-2"
-          style={{ background: "#1c1f26", border: "1px solid #303441" }}
-        >
-          <div className="flex flex-wrap items-center justify-between gap-2">
-            <div>
-              <div className="text-xs uppercase tracking-wider opacity-60">Trace analyzer</div>
-              <div className="mt-1 text-[11px] opacity-70">
-                Open any P0 JSON to replay phases, compare holds, and inspect coaching.
+        {labView === "results" && displayedRecording && !recording && !guidedActive && (
+          <>
+            <div className="rounded-lg p-4 flex flex-col gap-3" style={{ background: "#1c1f26", border: "1px solid #303441" }}>
+              <div className="flex items-start justify-between gap-3">
+                <div>
+                  <div className="text-xs uppercase tracking-wider" style={{ color: "#86efac" }}>Trace complete</div>
+                  <div className="mt-1 text-sm font-semibold">{displayedRecording.scenario}</div>
+                  <div className="mt-1 text-[10px] opacity-60">
+                    {displayedRecording.durationSec}s · {displayedRecording.samples.length} samples · {displayedRecording.events.length} events
+                  </div>
+                  {displayedRecording.device && (
+                    <div className="mt-1 text-[10px] opacity-55">
+                      device: {displayedRecording.device.platform ?? "unknown platform"} · {displayedRecording.device.screen.width}×{displayedRecording.device.screen.height} · {displayedRecording.device.orientation ?? "orientation unavailable"} · {displayedRecording.device.pixelRatio}× pixel ratio
+                    </div>
+                  )}
+                </div>
+                <div className="text-right text-[10px] opacity-60">
+                  {displayedRecording.contributor?.participantCode ?? "Imported trace"}<br />
+                  {displayedRecording.appBuild}
+                </div>
               </div>
-            </div>
-            <label
-              className="cursor-pointer rounded px-3 py-2 text-xs font-semibold"
-              style={{ background: "#0ea5e9", color: "white" }}
-            >
-              Open JSON
-              <input
-                type="file"
-                accept="application/json,.json"
-                className="sr-only"
-                onChange={(event) => {
-                  void importJson(event.target.files?.[0] ?? null);
-                  event.currentTarget.value = "";
-                }}
-              />
-            </label>
-          </div>
-          {imported && (
-            <div className="flex items-center justify-between gap-3 text-xs">
-              <span className="opacity-70">Viewing imported session: {imported.scenario}</span>
-              <button className="underline opacity-80" onClick={() => setImported(null)}>
-                Show latest run
+
+              {last && !imported && (
+                <label className="text-[11px] opacity-75 flex flex-col gap-1">
+                  Notes about this recording
+                  <textarea
+                    value={note}
+                    onChange={(event) => updateRunNote(event.target.value)}
+                    maxLength={2000}
+                    rows={3}
+                    placeholder="Describe phone movement, placement uncertainty, interruptions, breathing observations, or anything unexpected. Do not enter personal health information."
+                    className="rounded p-2.5 text-sm resize-y"
+                    style={{ background: "#0a0c10", color: "#e7e5e4", border: "1px solid #303441" }}
+                  />
+                </label>
+              )}
+
+              {last && !imported && (
+                <div className="grid grid-cols-1 sm:grid-cols-3 gap-2">
+                  <button
+                    onClick={() => void submitLastRecording()}
+                    disabled={centralCollection !== "ready" || submissionState.status === "submitting" || submissionState.status === "success"}
+                    className="rounded-md py-2.5 text-xs font-semibold disabled:opacity-35"
+                    style={{ background: "#16a34a", color: "white" }}
+                  >
+                    {submissionState.status === "submitting"
+                      ? "Submitting…"
+                      : submissionState.status === "success"
+                        ? "Submitted"
+                        : "Submit trace"}
+                  </button>
+                  <button
+                    onClick={() => download({ ...last, note })}
+                    className="rounded-md py-2.5 text-xs font-semibold"
+                    style={{ background: "#0ea5e9", color: "white" }}
+                  >
+                    Download JSON
+                  </button>
+                  <button
+                    onClick={() => void shareRecording({ ...last, note })}
+                    className="rounded-md py-2.5 text-xs font-semibold"
+                    style={{ background: "#334155", color: "white" }}
+                  >
+                    Share / email JSON
+                  </button>
+                </div>
+              )}
+
+              {centralCollection !== "ready" && last && !imported && (
+                <div className="rounded-md p-2 text-[10px] leading-relaxed" style={{ background: "#3a260f", color: "#fdba74", border: "1px solid #78350f" }}>
+                  Central upload is not configured yet. Download or share the JSON so this trace is not lost.
+                </div>
+              )}
+              {submissionState.status === "success" && (
+                <div className="rounded-md p-2 text-xs" style={{ background: "#0d2b1a", color: "#bbf7d0", border: "1px solid #166534" }}>
+                  Stored successfully. Receipt: <span className="font-semibold">{submissionState.id}</span>
+                </div>
+              )}
+              {submissionState.status === "error" && (
+                <div className="rounded-md p-2 text-xs" style={{ background: "#3a0f0f", color: "#fca5a5", border: "1px solid #7f1d1d" }}>
+                  {submissionState.message} Download the JSON backup before leaving this page.
+                </div>
+              )}
+
+              <button onClick={startAnotherRecording} className="self-start text-xs underline opacity-70">
+                Record another trace
               </button>
             </div>
-          )}
-          {importError && <div className="text-xs" style={{ color: "#fca5a5" }}>{importError}</div>}
-        </div>
 
-        {displayedRecording && !recording && !guidedActive && (
-          <LabTrace recording={displayedRecording as unknown as TraceRecording} />
+            {positionRuns.length > 0 && displayedRecording.positionStudy && last && !imported && (
+              <PositionStudyComparison
+                runs={positionRuns.filter(
+                  (run) => run.participantCode === displayedRecording.contributor?.participantCode,
+                )}
+              />
+            )}
+
+            <LabTrace recording={displayedRecording as unknown as TraceRecording} />
+          </>
+        )}
+
+        {labView === "home" && (
+          <details className="rounded-lg p-3" style={{ background: "#1c1f26", border: "1px solid #303441" }}>
+            <summary className="cursor-pointer text-xs uppercase tracking-wider opacity-65">Review an existing JSON</summary>
+            <div className="mt-3 flex flex-wrap items-center justify-between gap-2">
+              <div className="text-[11px] opacity-70">Open a previous P0 file to review its trace and results.</div>
+              <label className="cursor-pointer rounded px-3 py-2 text-xs font-semibold" style={{ background: "#0ea5e9", color: "white" }}>
+                Open JSON
+                <input
+                  type="file"
+                  accept="application/json,.json"
+                  className="sr-only"
+                  onChange={(event) => {
+                    void importJson(event.target.files?.[0] ?? null);
+                    event.currentTarget.value = "";
+                  }}
+                />
+              </label>
+            </div>
+            {importError && <div className="mt-2 text-xs" style={{ color: "#fca5a5" }}>{importError}</div>}
+          </details>
         )}
       </div>
     </main>
@@ -3291,13 +3500,61 @@ function newSessionId() {
   return `lab-${Date.now()}-${Math.random().toString(16).slice(2)}`;
 }
 
+function captureDeviceMetadata(): DeviceMetadata {
+  const nav = navigator as Navigator & { deviceMemory?: number };
+  return {
+    capturedAt: new Date().toISOString(),
+    userAgent: nav.userAgent,
+    platform: nav.platform || null,
+    language: nav.language || null,
+    timeZone: Intl.DateTimeFormat().resolvedOptions().timeZone || null,
+    viewport: { width: window.innerWidth, height: window.innerHeight },
+    screen: {
+      width: window.screen.width,
+      height: window.screen.height,
+      colorDepth: window.screen.colorDepth,
+    },
+    pixelRatio: window.devicePixelRatio || 1,
+    orientation: window.screen.orientation?.type ?? null,
+    touchPoints: Number.isFinite(nav.maxTouchPoints) ? nav.maxTouchPoints : null,
+    hardwareConcurrency: Number.isFinite(nav.hardwareConcurrency) ? nav.hardwareConcurrency : null,
+    deviceMemoryGb: Number.isFinite(nav.deviceMemory) ? nav.deviceMemory ?? null : null,
+  };
+}
+
+function recordingFilename(rec: Recording) {
+  const ts = rec.startedAt.replace(/[:.]/g, "-").replace(/T/, "_").slice(0, 19);
+  return `dibh-${rec.scenario}-${ts}.json`;
+}
+
+async function shareRecording(rec: Recording) {
+  const filename = recordingFilename(rec);
+  const file = new File([JSON.stringify(rec)], filename, { type: "application/json" });
+  const nav = navigator as Navigator & {
+    canShare?: (data: ShareData) => boolean;
+    share?: (data: ShareData) => Promise<void>;
+  };
+  if (nav.share && (!nav.canShare || nav.canShare({ files: [file] }))) {
+    try {
+      await nav.share({
+        title: "DIBH Lab trace",
+        text: `DIBH Lab trace ${rec.sessionId}`,
+        files: [file],
+      });
+      return;
+    } catch (error) {
+      if (error instanceof DOMException && error.name === "AbortError") return;
+    }
+  }
+  download(rec);
+}
+
 function download(rec: Recording) {
   const blob = new Blob([JSON.stringify(rec)], { type: "application/json" });
   const a = document.createElement("a");
   const url = URL.createObjectURL(blob);
   a.href = url;
-  const ts = rec.startedAt.replace(/[:.]/g, "-").replace(/T/, "_").slice(0, 19);
-  a.download = `dibh-${rec.scenario}-${ts}.json`;
+  a.download = recordingFilename(rec);
   document.body.appendChild(a);
   a.click();
   a.remove();
