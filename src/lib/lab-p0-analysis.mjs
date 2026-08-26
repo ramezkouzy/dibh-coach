@@ -1,6 +1,6 @@
 export const LAB_P0_ALGORITHM = Object.freeze({
   id: "dibh-lab-p0",
-  version: "0.4.0",
+  version: "0.5.0",
   params: Object.freeze({
     emaAlpha: 0.3,
     stabilityWindowMs: 2000,
@@ -12,6 +12,7 @@ export const LAB_P0_ALGORITHM = Object.freeze({
     driftDebounceMs: 1500,
     plateauTrimMs: 300,
     trainingToleranceFloorDeg: 1,
+    localTrainingToleranceFloorDeg: 0.5,
     trainingToleranceCeilingDeg: 2.5,
     trainingToleranceNoiseMultiplier: 3,
     calibrationExcursionSdCeilingDeg: 0.75,
@@ -22,6 +23,9 @@ export const LAB_P0_ALGORITHM = Object.freeze({
     recoveryDwellMs: 1500,
     targetAcquireDwellMs: 750,
     targetCueCooldownMs: 2500,
+    requiredNormalCycles: 3,
+    coachingCorrectionLimit: 2,
+    minimumCalibrationHoldDurationSec: 9.5,
     longGapMs: 50,
   }),
 });
@@ -48,6 +52,16 @@ function standardDeviation(values) {
   const center = mean(values);
   if (center == null) return null;
   return Math.sqrt(values.reduce((sum, value) => sum + (value - center) ** 2, 0) / values.length);
+}
+
+function sampleStandardDeviation(values) {
+  if (values.length < 2) return null;
+  const center = mean(values);
+  if (center == null) return null;
+  return Math.sqrt(
+    values.reduce((sum, value) => sum + (value - center) ** 2, 0) /
+      (values.length - 1),
+  );
 }
 
 function tightestCalibrationTrio(holds, direction) {
@@ -127,6 +141,7 @@ function eventIndex(event, fallback) {
 function eventRole(event, holdIndex, totalHolds) {
   if (
     event?.meta?.role === "learn" ||
+    event?.meta?.role === "calibration" ||
     event?.meta?.role === "practice" ||
     event?.meta?.role === "observation"
   ) {
@@ -348,11 +363,34 @@ function analyzeHold(points, events, holdStartEvent, fallbackIndex, totalHolds, 
   );
   const stability = stableSegments(points, holdStartEvent.t, release.t, thresholdDeg);
   const bestSegment = [...stability.segments].sort((a, b) => b.durationSec - a.durationSec)[0] ?? null;
+  const holdWindowPoints = pointsBetween(points, holdStartEvent.t, release.t);
+  const holdWindow = summarizePoints(holdWindowPoints);
+  const localAnchorFromEvent = Number(holdStartEvent?.meta?.localAnchorPitchDeg);
+  const hasLocalCycleAnchor = Number.isFinite(localAnchorFromEvent);
+  const localAnchorPitch = hasLocalCycleAnchor
+    ? localAnchorFromEvent
+    : prehold?.medianPitchDeg ?? null;
+  const directionFromEvent = Number(holdStartEvent?.meta?.direction);
   const plateauPitch = bestSegment?.medianPitchDeg ?? null;
   const preholdPitch = prehold?.medianPitchDeg ?? null;
   const rawExcursion =
     plateauPitch != null && preholdPitch != null ? plateauPitch - preholdPitch : null;
-  const direction = rawExcursion == null || Math.abs(rawExcursion) < 0.001 ? null : Math.sign(rawExcursion);
+  const direction =
+    hasLocalCycleAnchor && Math.abs(directionFromEvent) === 1
+      ? Math.sign(directionFromEvent)
+      : rawExcursion == null || Math.abs(rawExcursion) < 0.001
+        ? null
+        : Math.sign(rawExcursion);
+  const holdExcursions =
+    direction != null && localAnchorPitch != null
+      ? holdWindowPoints.map((point) => direction * (point.p - localAnchorPitch))
+      : [];
+  const calibrationDelta = median(holdExcursions);
+  const withinHoldSd = standardDeviation(holdExcursions);
+  const withinHoldMad = medianAbsoluteDeviation(holdExcursions);
+  const withinHoldRobustSd = withinHoldMad == null ? null : withinHoldMad * 1.4826;
+  const holdDurationSec = (release.t - holdStartEvent.t) / 1000;
+  const localProtocolRole = role === "calibration" || (role === "practice" && hasLocalCycleAnchor);
   const holdStartPoint = pointsBetween(
     points,
     holdStartEvent.t,
@@ -375,12 +413,30 @@ function analyzeHold(points, events, holdStartEvent, fallbackIndex, totalHolds, 
     }
   }
   const issues = [];
-  if (!prehold || prehold.sampleCount < 10) issues.push("insufficient_prehold_samples");
-  if (!bestSegment) issues.push("no_stable_segment");
-  if (rawExcursion == null || Math.abs(rawExcursion) < LAB_P0_ALGORITHM.params.minimumTargetExcursionDeg) {
-    issues.push("excursion_too_small");
+  if (localProtocolRole) {
+    const normalPeakPitches = holdStartEvent?.meta?.normalPeakPitchesDeg;
+    if (!Array.isArray(normalPeakPitches) || normalPeakPitches.length !== 3) {
+      issues.push("missing_three_cycle_anchor");
+    }
+    if (!hasLocalCycleAnchor) issues.push("missing_local_peak_anchor");
+    if (holdWindowPoints.length < 30) issues.push("insufficient_hold_samples");
+    if (holdDurationSec < LAB_P0_ALGORITHM.params.minimumCalibrationHoldDurationSec) {
+      issues.push("hold_shorter_than_9_5_seconds");
+    }
+    if (
+      calibrationDelta == null ||
+      calibrationDelta < LAB_P0_ALGORITHM.params.minimumTargetExcursionDeg
+    ) {
+      issues.push("excursion_too_small");
+    }
+  } else {
+    if (!prehold || prehold.sampleCount < 10) issues.push("insufficient_prehold_samples");
+    if (!bestSegment) issues.push("no_stable_segment");
+    if (rawExcursion == null || Math.abs(rawExcursion) < LAB_P0_ALGORITHM.params.minimumTargetExcursionDeg) {
+      issues.push("excursion_too_small");
+    }
+    if (!freshInhaleEvidence) issues.push("insufficient_fresh_inhale");
   }
-  if (!freshInhaleEvidence) issues.push("insufficient_fresh_inhale");
   if (
     events.some(
       (event) =>
@@ -404,6 +460,10 @@ function analyzeHold(points, events, holdStartEvent, fallbackIndex, totalHolds, 
       recoveryEndMs: round(recoveryEnd?.t, 1),
     },
     prehold,
+    localAnchorPitchDeg: round(localAnchorPitch),
+    normalPeakPitchesDeg: Array.isArray(holdStartEvent?.meta?.normalPeakPitchesDeg)
+      ? holdStartEvent.meta.normalPeakPitchesDeg.map((value) => round(Number(value)))
+      : [],
     direction,
     rawExcursionDeg: round(rawExcursion),
     relativeExcursionDeg: round(rawExcursion == null ? null : Math.abs(rawExcursion)),
@@ -415,6 +475,11 @@ function analyzeHold(points, events, holdStartEvent, fallbackIndex, totalHolds, 
     ),
     stabilityThresholdDeg: round(thresholdDeg),
     stabilitySlopeCeilingDegPerSec: LAB_P0_ALGORITHM.params.stableSlopeCeilingDegPerSec,
+    holdDurationSec: round(holdDurationSec),
+    holdWindow,
+    calibrationDeltaDeg: round(calibrationDelta),
+    withinHoldSdDeg: round(withinHoldSd),
+    withinHoldRobustSdDeg: round(withinHoldRobustSd),
     firstLockFromHoldStartSec: round(
       stability.firstLockAtMs == null
         ? null
@@ -476,7 +541,213 @@ function longestStableOnTargetRun(
   return round(longestMs / 1000);
 }
 
+function targetTimeStats(points, startMs, endMs, anchorPitch, direction, target, tolerance) {
+  if (
+    !Number.isFinite(anchorPitch) ||
+    !Number.isFinite(direction) ||
+    !Number.isFinite(target) ||
+    !Number.isFinite(tolerance)
+  ) {
+    return { timeInRangeSec: null, percentInRange: null, longestInRangeSec: null };
+  }
+  const holdPoints = pointsBetween(points, startMs, endMs);
+  let totalMs = 0;
+  let longestMs = 0;
+  let runMs = 0;
+  for (let index = 1; index < holdPoints.length; index++) {
+    const previous = holdPoints[index - 1];
+    const current = holdPoints[index];
+    const gap = current.t - previous.t;
+    const excursion = direction * (previous.p - anchorPitch);
+    const inRange = Math.abs(excursion - target) <= tolerance;
+    if (gap <= LAB_P0_ALGORITHM.params.longGapMs && inRange) {
+      totalMs += gap;
+      runMs += gap;
+      longestMs = Math.max(longestMs, runMs);
+    } else {
+      runMs = 0;
+    }
+  }
+  const durationMs = Math.max(0, endMs - startMs);
+  return {
+    timeInRangeSec: round(totalMs / 1000),
+    percentInRange: round(durationMs > 0 ? (totalMs / durationMs) * 100 : null, 1),
+    longestInRangeSec: round(longestMs / 1000),
+  };
+}
+
+function localCycleSessionSummary(holds, points, requestedHoldSeconds, events) {
+  const validHolds = holds.filter((hold) => hold.valid);
+  const calibrationHolds = validHolds
+    .filter((hold) => hold.role === "calibration" && Number.isFinite(hold.calibrationDeltaDeg))
+    .slice(0, 3);
+  const directions = calibrationHolds.map((hold) => hold.direction).filter(Number.isFinite);
+  const directionSum = directions.reduce((sum, value) => sum + value, 0);
+  const learnedDirection = directionSum === 0 ? null : Math.sign(directionSum);
+  const directionConsistencyPct = directions.length
+    ? (directions.filter((value) => value === learnedDirection).length / directions.length) * 100
+    : null;
+  const calibrationDeltas = calibrationHolds.map((hold) => hold.calibrationDeltaDeg);
+  const betweenHoldDeltaSd = sampleStandardDeviation(calibrationDeltas);
+  const withinHoldSds = calibrationHolds
+    .map((hold) => hold.withinHoldRobustSdDeg ?? hold.withinHoldSdDeg)
+    .filter(Number.isFinite);
+  const pooledWithinHoldSd = withinHoldSds.length
+    ? Math.sqrt(mean(withinHoldSds.map((value) => value ** 2)))
+    : null;
+  const combinedSd =
+    betweenHoldDeltaSd != null && pooledWithinHoldSd != null
+      ? Math.sqrt(betweenHoldDeltaSd ** 2 + pooledWithinHoldSd ** 2)
+      : betweenHoldDeltaSd ?? pooledWithinHoldSd;
+  const calibrationAvailable =
+    calibrationHolds.length === 3 && learnedDirection != null && directionConsistencyPct === 100;
+  const targetExcursion = calibrationAvailable ? mean(calibrationDeltas) : null;
+  const trainingTolerance =
+    calibrationAvailable && combinedSd != null
+      ? Math.min(
+          LAB_P0_ALGORITHM.params.trainingToleranceCeilingDeg,
+          Math.max(LAB_P0_ALGORITHM.params.localTrainingToleranceFloorDeg, combinedSd),
+        )
+      : null;
+
+  const practice = holds
+    .filter((hold) => hold.role === "practice" && hold.windows?.holdStartMs != null)
+    .map((hold) => {
+      const holdStart = hold.windows.holdStartMs;
+      const release = hold.windows.releaseMs;
+      const holdStartEvent = events.find(
+        (event) =>
+          event.type === "hold_start" && Number(event?.meta?.holdIndex) === hold.index,
+      );
+      const target = Number(holdStartEvent?.meta?.targetExcursionDeg ?? targetExcursion);
+      const tolerance = Number(holdStartEvent?.meta?.toleranceDeg ?? trainingTolerance);
+      const anchor = Number(hold.localAnchorPitchDeg);
+      const timeStats = targetTimeStats(
+        points,
+        holdStart,
+        release,
+        anchor,
+        hold.direction,
+        target,
+        tolerance,
+      );
+      const coachingEvents = events.filter(
+        (event) =>
+          event.type === "coach_cue" && Number(event?.meta?.holdIndex) === hold.index,
+      );
+      const correctionEvents = events.filter(
+        (event) =>
+          event.type === "correction_issued" && Number(event?.meta?.holdIndex) === hold.index,
+      );
+      const successfulCorrections = events.filter(
+        (event) =>
+          event.type === "correction_succeeded" && Number(event?.meta?.holdIndex) === hold.index,
+      );
+      const targetAcquired = events.find(
+        (event) =>
+          event.type === "target_acquired" && Number(event?.meta?.holdIndex) === hold.index,
+      );
+      const aborted = events.some(
+        (event) =>
+          event.type === "practice_hold_aborted" && Number(event?.meta?.holdIndex) === hold.index,
+      );
+      return {
+        index: hold.index,
+        calibrationReferencePitchDeg: round(anchor),
+        targetExcursionDeg: round(target),
+        toleranceDeg: round(tolerance),
+        medianHoldDeltaDeg: hold.calibrationDeltaDeg,
+        excursionTargetErrorDeg: round(
+          Number.isFinite(target) && Number.isFinite(hold.calibrationDeltaDeg)
+            ? hold.calibrationDeltaDeg - target
+            : null,
+        ),
+        insideExperimentalTrainingBand:
+          Number.isFinite(target) &&
+          Number.isFinite(tolerance) &&
+          Number.isFinite(hold.calibrationDeltaDeg)
+            ? Math.abs(hold.calibrationDeltaDeg - target) <= tolerance
+            : null,
+        timeInTargetRangeSec: timeStats.timeInRangeSec,
+        percentInTargetRange: timeStats.percentInRange,
+        longestStableOnTargetRunSec: timeStats.longestInRangeSec,
+        reachedRequestedDuration:
+          timeStats.longestInRangeSec == null || !Number.isFinite(requestedHoldSeconds)
+            ? null
+            : timeStats.longestInRangeSec >= requestedHoldSeconds,
+        holdCompleted: !aborted && hold.holdDurationSec >= requestedHoldSeconds - 0.5,
+        abortedAfterTwoCorrections: aborted,
+        targetAcquiredFromInhaleSec:
+          targetAcquired && Number.isFinite(hold.windows?.inhaleStartMs)
+            ? round((targetAcquired.t - hold.windows.inhaleStartMs) / 1000)
+            : null,
+        coachingCueCount: coachingEvents.length,
+        correctionCueCount: correctionEvents.length,
+        successfulCorrectionCount: successfulCorrections.length,
+        coachingCues: coachingEvents.map((event) => ({
+          t: round(event.t, 1),
+          cue: event?.meta?.cue ?? null,
+          reason: event?.meta?.reason ?? null,
+          measuredExcursionDeg: round(Number(event?.meta?.measuredExcursionDeg)),
+        })),
+      };
+    });
+
+  const calibrationAnchors = calibrationHolds.map((hold) => hold.localAnchorPitchDeg);
+  const holdMedians = validHolds
+    .map((hold) => hold.holdWindow?.medianPitchDeg)
+    .filter(Number.isFinite);
+  return {
+    totalHoldCount: holds.length,
+    validHoldCount: validHolds.length,
+    learnedDirection,
+    directionConsistencyPct: round(directionConsistencyPct, 1),
+    preholdPoseSdDeg: round(standardDeviation(calibrationAnchors)),
+    absolutePlateauSdDeg: round(standardDeviation(holdMedians)),
+    signedExcursionSdDeg: round(sampleStandardDeviation(calibrationDeltas)),
+    medianPlateauRobustSdDeg: round(median(withinHoldSds)),
+    learnedTarget: {
+      available: calibrationAvailable,
+      learnHoldCount: calibrationHolds.length,
+      selectedHoldIndexes: calibrationHolds.map((hold) => hold.index),
+      method: "local_three_peak_delta_mean_combined_sd",
+      targetPitchDeg: null,
+      targetPitchUse: "recomputed_from_each_local_three_peak_anchor",
+      targetSignedExcursionDeg: round(targetExcursion),
+      calibrationDeltasDeg: calibrationDeltas.map((value) => round(value)),
+      betweenHoldDeltaSdDeg: round(betweenHoldDeltaSd),
+      pooledWithinHoldSdDeg: round(pooledWithinHoldSd),
+      combinedSdDeg: round(combinedSd),
+      observedLearnPlateauSdDeg: round(standardDeviation(holdMedians.slice(0, 3))),
+      observedLearnExcursionSdDeg: round(betweenHoldDeltaSd),
+      calibrationExcursionSdCeilingDeg: null,
+      experimentalTrainingToleranceDeg: round(trainingTolerance),
+    },
+    practice,
+    sequenceTrend: {
+      interpretation: "descriptive_only_not_a_fatigue_diagnosis",
+      preholdVariabilitySlopeDegPerHold: sequenceSlope(
+        validHolds.map((hold) => hold.prehold?.sdDeg),
+      ),
+      relativeExcursionSlopeDegPerHold: sequenceSlope(
+        validHolds.map((hold) => hold.calibrationDeltaDeg),
+      ),
+      timeToStableSlopeSecPerHold: sequenceSlope(
+        validHolds.map((hold) => hold.firstLockFromHoldStartSec),
+      ),
+      stableDurationSlopeSecPerHold: sequenceSlope(
+        validHolds.map((hold) => hold.bestStableSegment?.durationSec),
+      ),
+      recoveryCompletedCount: holds.filter((hold) => hold.windows?.recoveryEndMs != null).length,
+      recoveryObservedHoldCount: holds.length,
+    },
+  };
+}
+
 function sessionSummary(holds, points, requestedHoldSeconds, events) {
+  if (holds.some((hold) => hold.role === "calibration")) {
+    return localCycleSessionSummary(holds, points, requestedHoldSeconds, events);
+  }
   const validHolds = holds.filter(
     (hold) => hold.valid && hold.bestStableSegment && hold.prehold,
   );

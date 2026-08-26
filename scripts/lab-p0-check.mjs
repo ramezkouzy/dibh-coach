@@ -2,6 +2,7 @@
 import assert from "node:assert/strict";
 
 import { analyzeLabRecording } from "../src/lib/lab-p0-analysis.mjs";
+import { detectRegularBreathingCycles } from "../src/lib/breath-cycle-analysis.mjs";
 
 const CHANNELS = [
   "t",
@@ -167,4 +168,124 @@ assert.equal(observationAnalysis.summary.learnedTarget.available, false);
 assert.equal(observationAnalysis.summary.learnedDirection, -1);
 assert.ok(observationAnalysis.summary.signedExcursionSdDeg < 0.2);
 
-console.log("Lab P0 synthetic replay checks passed for both pitch directions, calibration consistency, abort handling, and unconditional observation roles.");
+function synthLocalCycleProtocol(direction = -1) {
+  const stepMs = 20;
+  const samples = [];
+  const events = [];
+  let cursor = 0;
+  let previousPitch = 0;
+  const append = (durationMs, pitchAt) => {
+    const start = cursor;
+    for (let t = start; t < start + durationMs; t += stepMs) {
+      const pitch = pitchAt(t - start, durationMs, t);
+      const rrBeta = ((pitch - previousPitch) / stepMs) * 1000;
+      previousPitch = pitch;
+      samples.push([t, 0, pitch, pitch, 0, 0, 0, 0, 0, 0, 9.81, 0, rrBeta, 0]);
+    }
+    cursor += durationMs;
+  };
+  const appendThreeCycles = (holdIndex, role, restPitch) => {
+    const meta = { holdIndex, role };
+    const start = cursor;
+    events.push({ t: start, type: "prehold_start", meta });
+    append(12_000, (local) => restPitch + direction * 0.8 * Math.sin((local / 3000) * Math.PI * 2));
+    const anchor = restPitch + direction * 0.8;
+    events.push({ t: cursor, type: "prehold_end", meta });
+    events.push({
+      t: cursor,
+      type: "breathing_cycles_qualified",
+      meta: {
+        ...meta,
+        meanInspiratoryPeakPitchDeg: anchor,
+        peakPitchesDeg: [anchor - 0.02, anchor, anchor + 0.02],
+      },
+    });
+    return anchor;
+  };
+
+  events.push({ t: cursor, type: "baseline_start" });
+  append(12_000, (local) => direction * 0.8 * Math.sin((local / 3000) * Math.PI * 2));
+  events.push({ t: cursor, type: "baseline_end" });
+
+  const calibrationDeltas = [3, 3.3, 2.7];
+  for (let index = 0; index < calibrationDeltas.length; index++) {
+    const holdIndex = index + 1;
+    const role = "calibration";
+    const restPitch = index * 1.1;
+    const anchor = appendThreeCycles(holdIndex, role, restPitch);
+    const meta = { holdIndex, role };
+    events.push({ t: cursor, type: "inhale_start", meta });
+    append(1800, (local, duration) => restPitch + direction * (0.8 + calibrationDeltas[index] * local / duration));
+    events.push({
+      t: cursor,
+      type: "hold_start",
+      meta: {
+        ...meta,
+        direction,
+        localAnchorPitchDeg: anchor,
+        normalPeakPitchesDeg: [anchor - 0.02, anchor, anchor + 0.02],
+      },
+    });
+    append(10_000, (_local, _duration, t) => anchor + direction * calibrationDeltas[index] + 0.06 * Math.sin(t / 140));
+    events.push({ t: cursor, type: "release", meta });
+    append(1200, (local, duration) => anchor + direction * calibrationDeltas[index] * (1 - local / duration));
+  }
+
+  const practiceHoldIndex = 4;
+  const practiceMeta = { holdIndex: practiceHoldIndex, role: "practice" };
+  const practiceAnchor = appendThreeCycles(practiceHoldIndex, "practice", 0.4);
+  events.push({ t: cursor, type: "inhale_start", meta: practiceMeta });
+  append(1800, (local, duration) => 0.4 + direction * (0.8 + 3 * local / duration));
+  events.push({
+    t: cursor,
+    type: "hold_start",
+    meta: {
+      ...practiceMeta,
+      direction,
+      localAnchorPitchDeg: practiceAnchor,
+      normalPeakPitchesDeg: [practiceAnchor - 0.02, practiceAnchor, practiceAnchor + 0.02],
+      targetExcursionDeg: 3,
+      toleranceDeg: 0.5,
+    },
+  });
+  events.push({ t: cursor, type: "target_acquired", meta: practiceMeta });
+  append(10_000, (_local, _duration, t) => practiceAnchor + direction * 3.05 + 0.05 * Math.sin(t / 110));
+  events.push({ t: cursor, type: "release", meta: practiceMeta });
+  events.push({ t: cursor, type: "session_end" });
+
+  return {
+    schema: "dibh-lab/v3",
+    durationSec: cursor / 1000,
+    protocol: { holdSeconds: 10, requiredNormalCycles: 3 },
+    channels: CHANNELS,
+    samples,
+    events,
+  };
+}
+
+const cyclePoints = Array.from({ length: 701 }, (_, index) => {
+  const t = index * 20;
+  return { t, p: -0.8 * Math.sin((t / 3000) * Math.PI * 2) };
+});
+const detectedCycles = detectRegularBreathingCycles(cyclePoints, {
+  direction: -1,
+  requiredCycles: 3,
+  startMs: 0,
+});
+assert.equal(detectedCycles.ready, true, "three complete sinusoidal cycles should qualify");
+assert.equal(detectedCycles.peaks.length, 3);
+assert.ok(Math.abs(detectedCycles.meanInspiratoryPeakPitchDeg + 0.8) < 0.08);
+
+const localProtocol = synthLocalCycleProtocol(-1);
+const localAnalysis = analyzeLabRecording(localProtocol);
+assert.equal(localAnalysis.summary.learnedTarget.available, true);
+assert.equal(localAnalysis.summary.learnedTarget.method, "local_three_peak_delta_mean_combined_sd");
+assert.deepEqual(localAnalysis.summary.learnedTarget.selectedHoldIndexes, [1, 2, 3]);
+assert.ok(Math.abs(localAnalysis.summary.learnedTarget.targetSignedExcursionDeg - 3) < 0.05);
+assert.ok(Math.abs(localAnalysis.summary.learnedTarget.betweenHoldDeltaSdDeg - 0.3) < 0.05);
+assert.equal(localAnalysis.summary.learnedTarget.experimentalTrainingToleranceDeg, 0.5);
+assert.equal(localAnalysis.summary.practice.length, 1);
+assert.ok(localAnalysis.summary.practice[0].percentInTargetRange > 95);
+assert.equal(localAnalysis.summary.practice[0].holdCompleted, true);
+
+console.log("Lab P0 synthetic replay checks passed for legacy directions, observation replay, three-cycle detection, local-delta calibration, and coached target timing.");

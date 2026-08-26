@@ -20,9 +20,14 @@ type TraceSegment = {
 
 type TraceHold = {
   index: number;
-  role: "learn" | "practice" | "observation";
+  role: "learn" | "calibration" | "practice" | "observation";
   valid: boolean;
   direction?: number | null;
+  localAnchorPitchDeg?: number | null;
+  normalPeakPitchesDeg?: number[];
+  calibrationDeltaDeg?: number | null;
+  withinHoldRobustSdDeg?: number | null;
+  holdDurationSec?: number | null;
   relativeExcursionDeg?: number | null;
   firstLockFromHoldStartSec?: number | null;
   recoveryToPreholdMs?: number | null;
@@ -50,6 +55,11 @@ type TracePractice = {
   targetAcquiredFromInhaleSec?: number | null;
   coachingCueCount?: number;
   correctionCueCount?: number;
+  successfulCorrectionCount?: number;
+  timeInTargetRangeSec?: number | null;
+  percentInTargetRange?: number | null;
+  holdCompleted?: boolean;
+  abortedAfterTwoCorrections?: boolean;
 };
 
 export type TraceRecording = {
@@ -71,10 +81,15 @@ export type TraceRecording = {
       signedExcursionSdDeg?: number | null;
       learnedTarget?: {
         available?: boolean;
+        method?: string;
         learnHoldCount?: number;
         selectedHoldIndexes?: number[];
         targetSignedExcursionDeg?: number | null;
         observedLearnExcursionSdDeg?: number | null;
+        calibrationDeltasDeg?: number[];
+        betweenHoldDeltaSdDeg?: number | null;
+        pooledWithinHoldSdDeg?: number | null;
+        combinedSdDeg?: number | null;
         calibrationExcursionSdCeilingDeg?: number | null;
         experimentalTrainingToleranceDeg?: number | null;
       };
@@ -115,7 +130,7 @@ export default function LabTrace({ recording }: { recording: TraceRecording }) {
           value={`${summary.validHoldCount ?? 0}/${summary.totalHoldCount ?? 0}`}
         />
         <TraceStat
-          label="learned excursion"
+          label="target delta"
           value={formatDeg(target?.targetSignedExcursionDeg)}
         />
         <TraceStat label="excursion variation" value={formatDeg(summary.signedExcursionSdDeg)} />
@@ -124,6 +139,20 @@ export default function LabTrace({ recording }: { recording: TraceRecording }) {
           value={`${recording.analysis.quality?.effectiveSampleRateHz ?? "—"} Hz`}
         />
       </div>
+
+      {target?.method === "local_three_peak_delta_mean_combined_sd" && (
+        <div
+          className="rounded-md p-3 text-xs leading-relaxed"
+          style={{ background: "#0d2b1a", border: "1px solid #15803d", color: "#bbf7d0" }}
+        >
+          <div className="font-semibold">Local three-cycle calibration</div>
+          <div className="mt-1 opacity-90">
+            Deltas: {(target.calibrationDeltasDeg ?? []).map((value) => `${value.toFixed(2)}°`).join(" · ") || "collecting"}.
+            {" "}Mean target {formatDeg(target.targetSignedExcursionDeg)} with a ±{formatDeg(target.experimentalTrainingToleranceDeg)} band.
+            {" "}Between-hold SD {formatDeg(target.betweenHoldDeltaSdDeg)}; within-hold SD {formatDeg(target.pooledWithinHoldSdDeg)}.
+          </div>
+        </div>
+      )}
 
       {recording.scenario?.includes("observation") && (
         <div
@@ -161,6 +190,7 @@ export default function LabTrace({ recording }: { recording: TraceRecording }) {
           <Legend color="#38bdf8" label="inhale" />
           <Legend color="#a78bfa" label="hold" />
           <Legend color="#22c55e" label="stable" />
+          <Legend color="#86efac" label="local breathing peak" />
           <Legend color="#f59e0b" label="target band" />
           <Legend color="#fb7185" label="prerecorded prompt" />
         </div>
@@ -206,6 +236,19 @@ export default function LabTrace({ recording }: { recording: TraceRecording }) {
             );
           })}
           <path d={model.fullPath} fill="none" stroke="#e7e5e4" strokeWidth="1.5" />
+          {model.localBreathingPeaks.map((peak) => (
+            <circle
+              key={`local-peak-${peak.holdIndex}-${peak.peakNumber}-${peak.t}`}
+              cx={model.fullChart.x(peak.t)}
+              cy={model.fullChart.y(peak.p)}
+              r="4"
+              fill="#22c55e"
+              stroke="#bbf7d0"
+              strokeWidth="1.2"
+            >
+              <title>{`Hold ${peak.holdIndex} local breathing peak ${peak.peakNumber}`}</title>
+            </circle>
+          ))}
           {model.stablePaths.map((segment) => (
             <path
               key={segment.key}
@@ -258,7 +301,7 @@ export default function LabTrace({ recording }: { recording: TraceRecording }) {
                 fill="#e7e5e4"
                 fontSize="12"
               >
-                {hold.role === "observation" ? "O" : hold.role === "learn" ? "L" : "P"}{hold.index}
+                {holdRoleCode(hold.role)}{hold.index}
               </text>
             );
           })}
@@ -327,12 +370,12 @@ export default function LabTrace({ recording }: { recording: TraceRecording }) {
               <path
                 d={line.path}
                 fill="none"
-                stroke={line.role === "observation" ? "#38bdf8" : line.role === "learn" ? "#38bdf8" : "#a78bfa"}
+                stroke={line.role === "practice" ? "#a78bfa" : "#38bdf8"}
                 strokeWidth={line.role === "practice" ? "2.4" : "1.7"}
                 strokeDasharray={line.role === "practice" ? "7 4" : undefined}
                 opacity={line.valid ? 0.9 : 0.45}
               >
-                <title>{`${line.role === "observation" ? "Observation" : line.role === "learn" ? "Learn" : "Practice"} hold ${line.index}`}</title>
+                <title>{`${holdRoleLabel(line.role)} hold ${line.index}`}</title>
               </path>
               <text
                 x={Math.min(FULL_WIDTH - ALIGNED_MARGIN.right - 18, line.endX + 4)}
@@ -340,7 +383,7 @@ export default function LabTrace({ recording }: { recording: TraceRecording }) {
                 fill={line.role === "practice" ? "#a78bfa" : "#38bdf8"}
                 fontSize="12"
               >
-                {line.role === "observation" ? "O" : line.role === "learn" ? "L" : "P"}{line.index}
+                {holdRoleCode(line.role)}{line.index}
               </text>
             </g>
           ))}
@@ -358,11 +401,14 @@ export default function LabTrace({ recording }: { recording: TraceRecording }) {
             >
               <div className="mb-2 flex items-center justify-between">
                 <span className="font-semibold">
-                  {hold.role === "observation" ? "Observation" : hold.role === "learn" ? "Learn" : "Practice"} {hold.index}
+                  {holdRoleLabel(hold.role)} {hold.index}
                 </span>
                 <span className="opacity-60">{hold.valid ? "valid" : "review"}</span>
               </div>
-              <MetricRow label="relative excursion" value={formatDeg(hold.relativeExcursionDeg)} />
+              <MetricRow
+                label={hold.role === "calibration" || hold.localAnchorPitchDeg != null ? "local delta" : "relative excursion"}
+                value={formatDeg(hold.calibrationDeltaDeg ?? hold.relativeExcursionDeg)}
+              />
               <MetricRow
                 label="time to stable"
                 value={formatSeconds(hold.firstLockFromHoldStartSec)}
@@ -373,8 +419,9 @@ export default function LabTrace({ recording }: { recording: TraceRecording }) {
               />
               <MetricRow
                 label="hold variability"
-                value={formatDeg(hold.bestStableSegment?.robustSdDeg ?? hold.bestStableSegment?.sdDeg)}
+                value={formatDeg(hold.withinHoldRobustSdDeg ?? hold.bestStableSegment?.robustSdDeg ?? hold.bestStableSegment?.sdDeg)}
               />
+              <MetricRow label="timed hold" value={formatSeconds(hold.holdDurationSec)} />
               <MetricRow label="rest variability" value={formatDeg(hold.prehold?.sdDeg)} />
               <MetricRow
                 label="recovery"
@@ -393,11 +440,24 @@ export default function LabTrace({ recording }: { recording: TraceRecording }) {
                     value={formatSeconds(practice.targetAcquiredFromInhaleSec)}
                   />
                   <MetricRow
-                    label="stable + on target"
+                    label="longest beam-on"
                     value={formatSeconds(practice.longestStableOnTargetRunSec)}
+                  />
+                  <MetricRow
+                    label="time in range"
+                    value={
+                      practice.percentInTargetRange == null
+                        ? "—"
+                        : `${practice.timeInTargetRangeSec?.toFixed(1) ?? "—"}s · ${practice.percentInTargetRange.toFixed(0)}%`
+                    }
                   />
                   <MetricRow label="audio cues" value={`${practice.coachingCueCount ?? 0}`} />
                   <MetricRow label="direction corrections" value={`${practice.correctionCueCount ?? 0}`} />
+                  <MetricRow label="successful corrections" value={`${practice.successfulCorrectionCount ?? 0}`} />
+                  <MetricRow
+                    label="outcome"
+                    value={practice.abortedAfterTwoCorrections ? "aborted" : practice.holdCompleted ? "10s complete" : "review"}
+                  />
                 </>
               )}
             </div>
@@ -457,13 +517,13 @@ function buildTraceModel(recording: TraceRecording) {
     .filter(
       (hold) =>
         hold.role === "practice" &&
-        hold.prehold?.medianPitchDeg != null &&
+        (hold.localAnchorPitchDeg != null || hold.prehold?.medianPitchDeg != null) &&
         Number.isFinite(learnedDirection) &&
         Number.isFinite(learned?.targetSignedExcursionDeg) &&
         Number.isFinite(learned?.experimentalTrainingToleranceDeg),
     )
     .map((hold) => {
-      const anchor = hold.prehold?.medianPitchDeg as number;
+      const anchor = (hold.localAnchorPitchDeg ?? hold.prehold?.medianPitchDeg) as number;
       const direction = learnedDirection as number;
       const target = learned?.targetSignedExcursionDeg as number;
       const tolerance = learned?.experimentalTrainingToleranceDeg as number;
@@ -476,6 +536,23 @@ function buildTraceModel(recording: TraceRecording) {
         tolerance,
       };
     });
+  const localBreathingPeaks = recording.events.flatMap((event) => {
+    if (event.type !== "breathing_cycles_qualified") return [];
+    const times = Array.isArray(event.meta?.peakTimesMs) ? event.meta.peakTimesMs.map(Number) : [];
+    const pitches = Array.isArray(event.meta?.peakPitchesDeg)
+      ? event.meta.peakPitchesDeg.map(Number)
+      : [];
+    return times.flatMap((time, index) =>
+      Number.isFinite(time) && Number.isFinite(pitches[index])
+        ? [{
+            t: time,
+            p: displayDirection * pitches[index],
+            holdIndex: Number(event.meta?.holdIndex),
+            peakNumber: index + 1,
+          }]
+        : [],
+    );
+  });
   const stablePaths = recording.analysis.holds.flatMap((hold) =>
     (hold.stableSegments ?? []).map((segment, index) => {
       const segmentPoints = downsample(
@@ -495,7 +572,7 @@ function buildTraceModel(recording: TraceRecording) {
       const holdStart = hold.windows?.holdStartMs;
       const release = hold.windows?.releaseMs;
       const recoveryEnd = hold.windows?.recoveryEndMs;
-      const anchor = hold.prehold?.medianPitchDeg;
+      const anchor = hold.localAnchorPitchDeg ?? hold.prehold?.medianPitchDeg;
       const direction = hold.direction ?? learnedDirection;
       if (![start, release, anchor, direction].every(Number.isFinite)) return null;
       const seriesStart = Math.max(
@@ -576,6 +653,7 @@ function buildTraceModel(recording: TraceRecording) {
     fullPath: linePath(sampled, fullChart.x, fullChart.y),
     phases,
     targetBands,
+    localBreathingPeaks,
     stablePaths,
     alignedChart,
     alignedLines,
@@ -784,6 +862,18 @@ function MetricRow({ label, value }: { label: string; value: string }) {
       <span className="font-mono tabular-nums text-right">{value}</span>
     </div>
   );
+}
+
+function holdRoleLabel(role: TraceHold["role"]) {
+  if (role === "observation") return "Observation";
+  if (role === "calibration" || role === "learn") return "Calibration";
+  return "Coaching";
+}
+
+function holdRoleCode(role: TraceHold["role"]) {
+  if (role === "observation") return "O";
+  if (role === "calibration" || role === "learn") return "C";
+  return "P";
 }
 
 function formatDeg(value?: number | null) {

@@ -117,10 +117,10 @@ descriptive post-run metadata only; it never rejects or repeats a cycle.
 {
   "schema": "dibh-lab/v3",
   "sessionId": "33d87e61-79ee-45c7-9543-7c8d5e4e7405",
-  "appBuild": "lab-p0.7",
+  "appBuild": "lab-p0.8",
   "algorithm": {
     "id": "dibh-lab-p0",
-    "version": "0.4.0",
+    "version": "0.5.0",
     "params": {
       "emaAlpha": 0.3,
       "stabilityWindowMs": 2000,
@@ -131,19 +131,22 @@ descriptive post-run metadata only; it never rejects or repeats a cycle.
   "protocol": {
     "mode": "guided",
     "rehearsal": false,
-    "baselineSeconds": 10,
-    "cycleCount": 3,
+    "baselineSeconds": 0,
+    "cycleCount": 6,
+    "requiredNormalCycles": 3,
+    "calibrationHoldCount": 3,
+    "correctionLimit": 2,
     "holdSeconds": 10,
-    "holdCount": 3,
-    "learnHoldCount": null,
-    "calibrationAttemptLimit": null,
-    "practiceHoldCount": null,
-    "practiceAttemptLimit": null,
+    "holdCount": 6,
+    "learnHoldCount": 3,
+    "calibrationAttemptLimit": 6,
+    "practiceHoldCount": 3,
+    "practiceAttemptLimit": 6,
     "targetAcquisitionSeconds": null,
-    "recoverySeconds": 10,
+    "recoverySeconds": null,
     "handsFree": true,
     "phonePlacement": "charging_port_toward_face",
-    "targetMethod": null
+    "targetMethod": "local_three_peak_delta_mean_combined_sd"
   },
   "channels": [
     "t", "alpha", "beta", "betaEma", "gamma",
@@ -192,50 +195,51 @@ condition must persist for 1.5 seconds before a confirmed drift. Stable
 segments retain their exact boundaries, and plateau statistics are calculated
 from the segment interior rather than from the end of the entire attempt.
 
-Each hold records its quiet prehold anchor immediately before the READY prompt,
-before anticipatory inhale motion can contaminate it. The learned target is the
-robust median of the tightest three valid, direction-normalized excursions,
-provided their SD does not exceed 0.75 degrees. Absolute pitch is diagnostic
-only; every practice target is translated
-from the current attempt's relaxed anchor. The target remains fixed for the
-session and is not weakened by later performance. Session reproducibility is
-decomposed into:
+P0.8 stores `breathing_cycles_qualified` before every hold. Its metadata includes
+three inspiratory peak times and pitches, intervening troughs, their mean peak,
+cycle-period CV, mean amplitude, and amplitude CV. That three-peak mean is copied
+to `hold_start.meta.localAnchorPitchDeg`; absolute pitch remains diagnostic only.
+
+Each calibration hold stores its median direction-normalized delta from that
+local anchor plus its full-window and robust within-hold variability. The learned
+target is the arithmetic mean of the first three valid calibration deltas. Its
+half-range is the root-sum-square of sample SD between those deltas and pooled
+robust SD within the three 10-second holds, clamped to 0.5–2.5 degrees. The
+target delta remains fixed for the session, but every coaching attempt translates
+it from a new local three-cycle anchor. Session reproducibility is decomposed into:
 
 - `preholdPoseSdDeg`: phone/starting-pose consistency
 - `absolutePlateauSdDeg`: absolute held phone-angle consistency
 - `signedExcursionSdDeg`: breath-excursion consistency after normalizing the
   direction in which pitch moved
 
-`freshInhaleExcursionAtHoldStartDeg` records how far the phone moved from that
-anchor before the hold began. A hold is flagged when it does not show at least
-1.5 degrees of new movement in its learned direction; this makes a phone that
-was already near the target distinguishable from a new inhalation.
+`physiological_hold_detected` records the excursion, slope/dwell method, and
+detection latency that established the hold boundary. The deep-breath audio and
+detector run concurrently; audio completion is not used as `hold_start`.
 
-The successful Practice holds also report absolute and excursion target
-error, target-acquisition time, whether their plateau falls inside the
-experimental band, their longest continuous stable-and-on-target run, whether
-that run reached the selected duration, and the audio guidance issued. If three
-matching calibration holds do not produce a target, practice stops rather than
-silently using an invalid target. Practice must acquire the target band within
-five seconds. Sustained drift receives one correction, then aborts to RELEASE
-if the signal remains outside the band.
+Coached holds report excursion error, target-acquisition time, total and percent
+time in range, longest continuous beam-on interval, 10-second completion,
+correction count, successful correction count, and abort state. The hold clock
+does not pause outside the band. Sustained low/high drift receives the matching
+directional cue. Two unsuccessful corrections abort to release.
 
-Recovery is also hands-free and ends at the configured duration. The two-second
-window immediately before READY provides the next attempt's relaxed anchor;
-low-confidence anchors are flagged without silently extending the rest.
+Recovery is hands-free and ends only after three new complete, sufficiently
+regular cycles qualify; it is not a fixed-duration rest.
 `guided_stage`, `guided_phase`, `coach_cue`, `coach_cue_end`,
+`breathing_cycle_observation_start`, `breathing_cycles_qualified`,
+`physiological_hold_detected`,
 `calibration_hold_measured`, `calibration_hold_rejected`,
-`calibration_acquisition_aborted`, `practice_attempt_aborted`,
+`calibration_attempt_aborted`, `practice_attempt_aborted`,
 `practice_hold_aborted`, `practice_hold_completed`,
-`recovery_minimum_complete`, `rest_anchor_acquired`, `recovery_end`,
-`target_learned`, `target_acquired`, `target_enter`, and `target_exit` events
+`recovery_end`, `target_learned`, `target_acquired`, `target_enter`,
+`target_exit`, `beam_on`, `beam_off`, `correction_issued`, and
+`correction_succeeded` events
 make the complete instruction and measurement flow replayable.
 
 The embedded target band is explicitly named
-`experimentalTrainingToleranceDeg`. It is derived from typical within-hold
-noise and clamped to 1.0–2.5 degrees; inconsistent Learn holds do not
-automatically widen it. It is a detector-development value, not a clinically
-validated RT tolerance.
+`experimentalTrainingToleranceDeg`. It is derived from both between-hold and
+within-hold variability and clamped to 0.5–2.5 degrees. It is a
+detector-development value, not a clinically validated RT tolerance.
 
 ---
 

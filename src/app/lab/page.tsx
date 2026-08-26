@@ -3,6 +3,7 @@
 import { useEffect, useRef, useState, useCallback } from "react";
 import { playClip, stopAudio, unlockAudio } from "@/audio";
 import { analyzeLabRecording, LAB_P0_ALGORITHM } from "@/lib/lab-p0-analysis.mjs";
+import { detectRegularBreathingCycles } from "@/lib/breath-cycle-analysis.mjs";
 import LabTrace, { type TraceRecording } from "./LabTrace";
 
 // Schema v3: full multi-channel sensor capture plus the exact EMA pitch used
@@ -49,11 +50,14 @@ type LabEvent = { t: number; type: string; meta?: Record<string, unknown> };
 
 type GuidedConfig = {
   holdSeconds: number;
+  calibrationHoldCount?: number;
+  practiceHoldCount: number;
+  requiredNormalCycles?: number;
+  correctionLimit?: number;
+  initialDirection: -1 | 1;
   cycleCount: number;
   baselineSeconds: number;
   recoverySeconds: number;
-  initialDirection: -1 | 1;
-  practiceHoldCount?: number;
 };
 
 type LearnedTarget = {
@@ -62,7 +66,31 @@ type LearnedTarget = {
   toleranceDeg: number;
 };
 
-type GuidedStage = "idle" | "setup" | "rehearsal" | "baseline" | "calibration" | "practice" | "cycle" | "complete";
+type BreathingCycleResult = {
+  ready: boolean;
+  qualifiedPeakCount: number;
+  windowStartMs?: number;
+  windowEndMs?: number;
+  direction?: number;
+  peaks?: Array<{ t: number; pitchDeg: number }>;
+  troughs?: Array<{ t: number; pitchDeg: number }>;
+  meanInspiratoryPeakPitchDeg?: number;
+  meanCyclePeriodSec?: number;
+  cyclePeriodCv?: number;
+  meanAmplitudeDeg?: number;
+  amplitudeCv?: number;
+};
+
+type GuidedStage =
+  | "idle"
+  | "setup"
+  | "rehearsal"
+  | "baseline"
+  | "breathing"
+  | "calibration"
+  | "practice"
+  | "cycle"
+  | "complete";
 
 type LiveGate = {
   mode: "calibration" | "practice";
@@ -88,6 +116,9 @@ type Recording = {
     rehearsal: boolean;
     baselineSeconds: number | null;
     cycleCount: number | null;
+    requiredNormalCycles: number | null;
+    calibrationHoldCount: number | null;
+    correctionLimit: number | null;
     holdSeconds: number | null;
     holdCount: number | null;
     learnHoldCount: number | null;
@@ -98,7 +129,7 @@ type Recording = {
     recoverySeconds: number | null;
     handsFree: boolean;
     phonePlacement: "charging_port_toward_face" | null;
-    targetMethod: "median_relative_excursion" | null;
+    targetMethod: "local_three_peak_delta_mean_combined_sd" | "median_relative_excursion" | null;
   };
   samples: Sample[];
   events: LabEvent[];
@@ -152,22 +183,28 @@ const GUIDED_JOURNEY: Array<{
   data: string;
 }> = [
   {
-    id: "baseline",
-    title: "1. Normal breathing",
-    detail: "Record the full breathing trace for 10 seconds.",
-    data: "Normal inspiration and expiration",
+    id: "breathing",
+    title: "1. Three cycles",
+    detail: "Wait for three complete regular breaths before every hold.",
+    data: "Three local inspiratory peaks",
   },
   {
-    id: "cycle",
-    title: "2. Three cycles",
-    detail: "Deep breath, 10-second hold, then 10-second recovery.",
-    data: "Three complete breathing and hold cycles",
+    id: "calibration",
+    title: "2. Calibrate ×3",
+    detail: "Measure each local peak-to-10-second-hold delta.",
+    data: "Three local deltas plus within-hold drift",
+  },
+  {
+    id: "practice",
+    title: "3. Coach ×3",
+    detail: "Guide each 10-second hold inside the learned band.",
+    data: "Beam-on time and up to two corrections",
   },
   {
     id: "complete",
-    title: "3. Review",
+    title: "4. Review",
     detail: "Inspect the uninterrupted trace and download the JSON.",
-    data: "Full trace and descriptive hold quality",
+    data: "Local anchors, deltas, range, and coaching response",
   },
 ];
 
@@ -458,7 +495,7 @@ export default function LabPage() {
     const recordingBase = {
       schema: "dibh-lab/v3" as const,
       sessionId: sessionIdRef.current,
-      appBuild: "lab-p0.7",
+      appBuild: "lab-p0.8",
       algorithm: LAB_P0_ALGORITHM,
       scenario: activeScenarioRef.current,
       note,
@@ -469,18 +506,30 @@ export default function LabPage() {
         mode: guidedConfig ? ("guided" as const) : ("free" as const),
         rehearsal: false,
         baselineSeconds: guidedConfig?.baselineSeconds ?? null,
-        cycleCount: guidedConfig?.cycleCount ?? null,
+        cycleCount:
+          guidedConfig?.calibrationHoldCount != null && guidedConfig?.practiceHoldCount != null
+            ? guidedConfig.calibrationHoldCount + guidedConfig.practiceHoldCount
+            : guidedConfig?.cycleCount ?? null,
+        requiredNormalCycles: guidedConfig?.requiredNormalCycles ?? null,
+        calibrationHoldCount: guidedConfig?.calibrationHoldCount ?? null,
+        correctionLimit: guidedConfig?.correctionLimit ?? null,
         holdSeconds: guidedConfig?.holdSeconds ?? null,
-        holdCount: guidedConfig?.cycleCount ?? null,
-        learnHoldCount: null,
-        calibrationAttemptLimit: null,
-        practiceHoldCount: null,
-        practiceAttemptLimit: null,
+        holdCount:
+          guidedConfig?.calibrationHoldCount != null && guidedConfig?.practiceHoldCount != null
+            ? guidedConfig.calibrationHoldCount + guidedConfig.practiceHoldCount
+            : guidedConfig?.cycleCount ?? null,
+        learnHoldCount: guidedConfig?.calibrationHoldCount ?? null,
+        calibrationAttemptLimit: guidedConfig?.calibrationHoldCount != null ? 6 : null,
+        practiceHoldCount: guidedConfig?.practiceHoldCount ?? null,
+        practiceAttemptLimit:
+          guidedConfig?.practiceHoldCount != null ? guidedConfig.practiceHoldCount * 2 : null,
         targetAcquisitionSeconds: null,
-        recoverySeconds: guidedConfig?.recoverySeconds ?? null,
+        recoverySeconds: null,
         handsFree: Boolean(guidedConfig),
         phonePlacement: guidedConfig ? "charging_port_toward_face" as const : null,
-        targetMethod: null,
+        targetMethod: guidedConfig?.calibrationHoldCount
+          ? "local_three_peak_delta_mean_combined_sd" as const
+          : null,
       },
       samples: samplesRef.current,
       events: eventsRef.current,
@@ -790,7 +839,7 @@ export default function LabPage() {
     return guidedRunningRef.current;
   };
 
-  const startGuided = async () => {
+  const startGuidedObservationLegacy = async () => {
     unlockAudio();
     if (!granted) {
       await requestPerm();
@@ -804,6 +853,7 @@ export default function LabPage() {
       baselineSeconds: 10,
       recoverySeconds: 10,
       initialDirection: -1,
+      practiceHoldCount: 0,
     };
     startRec("p0-observation-3x10s", config);
     const sessionStart = startedAtRef.current;
@@ -917,6 +967,626 @@ export default function LabPage() {
       setGuidedPhase("IDLE");
       setGuidedLabel("");
       setStepCountdown(0);
+      guidedRunningRef.current = false;
+      if (recordingRef.current) {
+        await sleep(400);
+        stopRec();
+      }
+    }
+  };
+
+  const startGuided = async () => {
+    unlockAudio();
+    if (!granted) {
+      await requestPerm();
+      return;
+    }
+    if (recording) return;
+
+    const config: GuidedConfig = {
+      holdSeconds: 10,
+      calibrationHoldCount: 3,
+      practiceHoldCount: 3,
+      requiredNormalCycles: 3,
+      correctionLimit: 2,
+      initialDirection: -1,
+      cycleCount: 6,
+      baselineSeconds: 0,
+      recoverySeconds: 0,
+    };
+    startRec("p0-local-3peak-calibration-coaching", config);
+    const sessionStart = startedAtRef.current;
+    const initialPitch = oRef.current.betaEma ?? oRef.current.beta ?? pitch;
+    setTraceAnchorPitch(initialPitch);
+    setTraceSessionStart(sessionStart);
+    setGuidedActive(true);
+    guidedRunningRef.current = true;
+
+    const requireCue = async (
+      cue: Parameters<typeof playClip>[0],
+      meta: Record<string, unknown>,
+    ) => {
+      const result = await coach(cue, meta);
+      if (result === "ended") return true;
+      mark("session_end", { outcome: "audio_unavailable", cue, result });
+      setGuidedLabel("AUDIO UNAVAILABLE • Stop and use Test voice before restarting");
+      guidedRunningRef.current = false;
+      return false;
+    };
+
+    const signalPoints = () =>
+      samplesRef.current
+        .map((sample) => ({ t: sample[0], p: sample[3] ?? sample[2] }))
+        .filter((point): point is { t: number; p: number } =>
+          point.p != null && Number.isFinite(point.p),
+        );
+
+    const waitForThreeCycles = async (
+      meta: Record<string, unknown>,
+      observationStartMs: number,
+      announceRest: boolean,
+    ) => {
+      const waitingStage: GuidedStage =
+        meta.role === "practice"
+          ? "practice"
+          : Number(meta.calibrationNumber) > 1
+            ? "calibration"
+            : "breathing";
+      enterGuidedStage(waitingStage);
+      enterGuidedPhase("rest", "BREATHE NORMALLY • Waiting for 3 regular cycles", meta);
+      mark("breathing_cycle_observation_start", {
+        ...meta,
+        requiredCycles: config.requiredNormalCycles,
+        source: "physiology_driven",
+      });
+      if (announceRest && !(await requireCue("p0_rest", meta))) return null;
+      while (guidedRunningRef.current) {
+        const result = detectRegularBreathingCycles(signalPoints(), {
+          direction: config.initialDirection,
+          startMs: observationStartMs,
+          requiredCycles: config.requiredNormalCycles,
+        }) as BreathingCycleResult;
+        setStepCountdown(result.qualifiedPeakCount ?? 0);
+        setGuidedLabel(
+          `BREATHE NORMALLY • ${result.qualifiedPeakCount ?? 0} of ${config.requiredNormalCycles} regular cycles`,
+        );
+        if (
+          result.ready &&
+          result.windowStartMs != null &&
+          result.windowEndMs != null &&
+          result.direction != null &&
+          result.peaks &&
+          result.troughs &&
+          result.meanInspiratoryPeakPitchDeg != null &&
+          result.meanAmplitudeDeg != null
+        ) {
+          const cycleMeta = {
+            ...meta,
+            source: "three_complete_regular_cycles",
+            direction: result.direction,
+            requiredCycles: config.requiredNormalCycles,
+            peakTimesMs: result.peaks.map((peak: { t: number }) => peak.t),
+            peakPitchesDeg: result.peaks.map((peak: { pitchDeg: number }) => peak.pitchDeg),
+            troughTimesMs: result.troughs.map((trough: { t: number }) => trough.t),
+            meanInspiratoryPeakPitchDeg: result.meanInspiratoryPeakPitchDeg,
+            meanCyclePeriodSec: result.meanCyclePeriodSec,
+            cyclePeriodCv: result.cyclePeriodCv,
+            meanAmplitudeDeg: result.meanAmplitudeDeg,
+            amplitudeCv: result.amplitudeCv,
+          };
+          markAt(result.windowStartMs, "prehold_start", cycleMeta);
+          markAt(result.windowEndMs, "prehold_end", cycleMeta);
+          mark("breathing_cycles_qualified", cycleMeta);
+          setStepCountdown(0);
+          return result;
+        }
+        await sleep(200);
+      }
+      setStepCountdown(0);
+      return null;
+    };
+
+    const waitForPhysiologicalHold = async (
+      meta: Record<string, unknown>,
+      anchorPitch: number,
+      normalAmplitudeDeg: number,
+      inhaleCuePromise: Promise<ReturnType<typeof playClip> extends Promise<infer T> ? T : never>,
+    ) => {
+      const detectorStartedAt = performance.now();
+      const deadline = detectorStartedAt + 12_000;
+      const minimumDelta = Math.max(0.4, Math.min(1, normalAmplitudeDeg * 0.25));
+      let candidateSince: number | null = null;
+      let cueResult: Awaited<ReturnType<typeof playClip>> | null = null;
+      void inhaleCuePromise.then((result) => {
+        cueResult = result;
+      });
+      setGuidedLabel("DEEP BREATH IN AND HOLD • Detecting the held plateau");
+      while (guidedRunningRef.current && performance.now() < deadline) {
+        if (cueResult != null && cueResult !== "ended") return null;
+        const now = performance.now();
+        const nowMs = now - startedAtRef.current;
+        const stats = recentPitchStats(samplesRef.current, nowMs, 1000);
+        const excursion =
+          stats == null
+            ? null
+            : config.initialDirection * (stats.medianPitchDeg - anchorPitch);
+        const plateauLike = Boolean(
+          stats &&
+            excursion != null &&
+            excursion >= minimumDelta &&
+            stats.sdDeg <= Math.max(0.4, normalAmplitudeDeg * 0.3) &&
+            Math.abs(stats.slopeDegPerSec) <= 0.45,
+        );
+        if (!plateauLike) {
+          candidateSince = null;
+        } else {
+          candidateSince ??= now;
+          if (now - candidateSince >= 600) {
+            const holdStartPerformanceMs = candidateSince;
+            const holdStartSessionMs = holdStartPerformanceMs - startedAtRef.current;
+            markAt(holdStartSessionMs, "physiological_hold_detected", {
+              ...meta,
+              method: "deep_excursion_plus_low_slope_dwell",
+              detectionDwellMs: 600,
+              minimumDeltaDeg: roundClient(minimumDelta),
+              measuredDeltaDeg: roundClient(excursion as number),
+              detectionLatencyMs: roundClient(now - candidateSince),
+            });
+            return {
+              performanceMs: holdStartPerformanceMs,
+              sessionMs: holdStartSessionMs,
+            };
+          }
+        }
+        await sleep(150);
+      }
+      return null;
+    };
+
+    const runCoachedHold = async (
+      meta: Record<string, unknown>,
+      anchorPitch: number,
+      target: LearnedTarget,
+      holdStartedAt: number,
+    ) => {
+      const deadline = holdStartedAt + config.holdSeconds * 1000;
+      let fiveSecondsAnnounced = false;
+      let wasInBand: boolean | null = null;
+      let outOfBandSince: number | null = null;
+      let correctionCount = 0;
+      let lastCorrectionCompletedAt: number | null = null;
+      let pendingCorrection: number | null = null;
+      let targetTonePlayed = false;
+
+      while (guidedRunningRef.current && performance.now() < deadline) {
+        const now = performance.now();
+        setStepCountdown(Math.max(1, Math.ceil((deadline - now) / 1000)));
+        if (!fiveSecondsAnnounced && now >= deadline - 5000) {
+          fiveSecondsAnnounced = true;
+          if (!(await requireCue("p0_five_seconds_left", {
+            ...meta,
+            reason: "five_seconds_remaining",
+          }))) return { completed: false, aborted: true, correctionCount };
+        }
+
+        const currentPitch = oRef.current.betaEma ?? oRef.current.beta;
+        if (currentPitch == null) {
+          await sleep(150);
+          continue;
+        }
+        const excursion = target.direction * (currentPitch - anchorPitch);
+        const error = excursion - target.excursionDeg;
+        const inBand = Math.abs(error) <= target.toleranceDeg;
+
+        if (inBand && wasInBand !== true) {
+          mark("target_enter", {
+            ...meta,
+            measuredExcursionDeg: roundClient(excursion),
+            targetExcursionDeg: target.excursionDeg,
+            toleranceDeg: target.toleranceDeg,
+          });
+          mark("beam_on", { ...meta, reason: "inside_target_band" });
+          if (pendingCorrection != null) {
+            mark("correction_succeeded", {
+              ...meta,
+              correctionNumber: pendingCorrection,
+              measuredExcursionDeg: roundClient(excursion),
+            });
+            pendingCorrection = null;
+          }
+          if (!targetTonePlayed) {
+            targetTonePlayed = true;
+            mark("target_acquired", {
+              ...meta,
+              measuredExcursionDeg: roundClient(excursion),
+              targetExcursionDeg: target.excursionDeg,
+              toleranceDeg: target.toleranceDeg,
+            });
+            if (!(await requireCue("p0_in_range_ding", {
+              ...meta,
+              reason: "target_acquired",
+            }))) return { completed: false, aborted: true, correctionCount };
+          }
+        } else if (!inBand && wasInBand === true) {
+          mark("target_exit", {
+            ...meta,
+            measuredExcursionDeg: roundClient(excursion),
+            errorDeg: roundClient(error),
+          });
+          mark("beam_off", { ...meta, reason: "outside_target_band" });
+        }
+
+        if (inBand) {
+          outOfBandSince = null;
+        } else {
+          outOfBandSince ??= now;
+          const responseWindowComplete =
+            lastCorrectionCompletedAt == null || now - lastCorrectionCompletedAt >= 1800;
+          const fiveSecondCueProtected =
+            !fiveSecondsAnnounced && now >= deadline - 6200;
+          const hasTimeForCorrection = deadline - now > 1400;
+          if (
+            now - outOfBandSince >= 1000 &&
+            responseWindowComplete &&
+            !fiveSecondCueProtected &&
+            hasTimeForCorrection
+          ) {
+            if (correctionCount < (config.correctionLimit ?? 2)) {
+              correctionCount += 1;
+              pendingCorrection = correctionCount;
+              const below = error < 0;
+              mark("correction_issued", {
+                ...meta,
+                correctionNumber: correctionCount,
+                direction: below ? "deeper" : "ease_back",
+                measuredExcursionDeg: roundClient(excursion),
+                errorDeg: roundClient(error),
+              });
+              const cueResult = await coach(below ? "p0_deeper" : "p0_ease_back", {
+                ...meta,
+                correctionNumber: correctionCount,
+                reason: below ? "below_target_band" : "above_target_band",
+                measuredExcursionDeg: roundClient(excursion),
+                targetExcursionDeg: target.excursionDeg,
+                errorDeg: roundClient(error),
+              });
+              if (cueResult !== "ended") {
+                guidedRunningRef.current = false;
+                return { completed: false, aborted: true, correctionCount };
+              }
+              lastCorrectionCompletedAt = performance.now();
+              outOfBandSince = lastCorrectionCompletedAt;
+            } else {
+              mark("practice_hold_aborted", {
+                ...meta,
+                reason: error < 0
+                  ? "two_corrections_failed_below_target"
+                  : "two_corrections_failed_above_target",
+                correctionCount,
+                measuredExcursionDeg: roundClient(excursion),
+                targetExcursionDeg: target.excursionDeg,
+              });
+              if (wasInBand) mark("beam_off", { ...meta, reason: "hold_aborted" });
+              setStepCountdown(0);
+              return { completed: false, aborted: true, correctionCount };
+            }
+          }
+        }
+        wasInBand = inBand;
+        await sleep(150);
+      }
+
+      if (
+        wasInBand === false &&
+        pendingCorrection != null &&
+        correctionCount >= (config.correctionLimit ?? 2)
+      ) {
+        mark("practice_hold_aborted", {
+          ...meta,
+          reason: "two_corrections_failed_before_hold_end",
+          correctionCount,
+        });
+        setStepCountdown(0);
+        return { completed: false, aborted: true, correctionCount };
+      }
+      if (wasInBand) mark("beam_off", { ...meta, reason: "hold_complete" });
+      setStepCountdown(0);
+      return { completed: guidedRunningRef.current, aborted: false, correctionCount };
+    };
+
+    let nextHoldIndex = 1;
+    let nextBreathingObservationStartMs = 0;
+    let previousMeta: Record<string, unknown> | null = null;
+
+    try {
+      mark("baseline_start");
+      enterGuidedStage("calibration");
+      if (!(await requireCue("p0_calibration_intro", { phase: "calibration" }))) return;
+
+      let completedCalibrationCount = 0;
+      let calibrationAttemptCount = 0;
+      while (
+        guidedRunningRef.current &&
+        completedCalibrationCount < (config.calibrationHoldCount ?? 3) &&
+        calibrationAttemptCount < 6
+      ) {
+        calibrationAttemptCount += 1;
+        const calibrationNumber = completedCalibrationCount + 1;
+        const meta: Record<string, unknown> = {
+          holdIndex: nextHoldIndex,
+          role: "calibration",
+          calibrationNumber,
+          calibrationAttemptNumber: calibrationAttemptCount,
+        };
+        const cycles = await waitForThreeCycles(
+          meta,
+          nextBreathingObservationStartMs,
+          calibrationAttemptCount === 1,
+        );
+        if (!cycles || !guidedRunningRef.current) return;
+        if (completedCalibrationCount === 0) mark("baseline_end");
+        if (previousMeta) {
+          mark("recovery_end", {
+            ...previousMeta,
+            readyForHoldIndex: nextHoldIndex,
+            source: "three_complete_regular_cycles",
+          });
+        }
+        const anchorPitch = cycles.meanInspiratoryPeakPitchDeg as number;
+        setLiveGate({
+          mode: "calibration",
+          anchorPitch,
+          direction: config.initialDirection,
+          targetExcursionDeg: null,
+          toleranceDeg: null,
+          label: `Calibration ${calibrationNumber} of ${config.calibrationHoldCount} • local reference is the mean of three peaks`,
+        });
+        enterGuidedStage("calibration");
+        enterGuidedPhase(
+          "inhale",
+          `DEEP BREATH • Calibration ${calibrationNumber} of ${config.calibrationHoldCount}`,
+          meta,
+        );
+        mark("inhale_start", meta);
+        const inhaleCuePromise = coach("p0_inhale", meta);
+        const onset = await waitForPhysiologicalHold(
+          meta,
+          anchorPitch,
+          cycles.meanAmplitudeDeg as number,
+          inhaleCuePromise,
+        );
+        const inhaleResult = await inhaleCuePromise;
+        if (inhaleResult !== "ended") {
+          guidedRunningRef.current = false;
+          return;
+        }
+        if (!onset) {
+          mark("calibration_attempt_aborted", { ...meta, reason: "physiological_hold_not_detected" });
+          mark("release", { ...meta, reason: "physiological_hold_not_detected" });
+          enterGuidedPhase("release", "RELEASE • Hold not detected", meta);
+          if (!(await requireCue("p0_calibration_retry", meta))) return;
+          nextBreathingObservationStartMs = performance.now() - startedAtRef.current;
+          previousMeta = meta;
+          nextHoldIndex += 1;
+          continue;
+        }
+
+        enterGuidedPhase(
+          "hold",
+          `HOLD • Calibration ${calibrationNumber} of ${config.calibrationHoldCount}`,
+          meta,
+        );
+        markAt(onset.sessionMs, "hold_start", {
+          ...meta,
+          source: "physiological_hold_detection",
+          direction: config.initialDirection,
+          localAnchorPitchDeg: anchorPitch,
+          normalPeakPitchesDeg: cycles.peaks!.map((peak) => peak.pitchDeg),
+          normalMeanAmplitudeDeg: cycles.meanAmplitudeDeg,
+        });
+        const completed = await waitThroughTimedHold(
+          onset.performanceMs,
+          config.holdSeconds,
+          `HOLD • Calibration ${calibrationNumber} of ${config.calibrationHoldCount}`,
+          meta,
+        );
+        if (!completed) return;
+        mark("release", meta);
+        enterGuidedPhase("release", "RELEASE • Breathe normally", meta);
+        if (!(await requireCue("p0_release", meta))) return;
+        const analysis = currentAnalysis();
+        const completedHold = analysis.holds.find(
+          (hold: { index: number }) => hold.index === nextHoldIndex,
+        );
+        if (completedHold?.valid) {
+          completedCalibrationCount += 1;
+          mark("calibration_hold_measured", {
+            ...meta,
+            completedCalibrationCount,
+            calibrationDeltaDeg: completedHold.calibrationDeltaDeg,
+            withinHoldRobustSdDeg: completedHold.withinHoldRobustSdDeg,
+          });
+        } else {
+          mark("calibration_hold_rejected", {
+            ...meta,
+            issues: completedHold?.issues ?? ["not_measurable"],
+          });
+        }
+        nextBreathingObservationStartMs = performance.now() - startedAtRef.current;
+        previousMeta = meta;
+        nextHoldIndex += 1;
+      }
+
+      const learned = currentAnalysis().summary.learnedTarget;
+      const learnedDirection = currentAnalysis().summary.learnedDirection;
+      if (
+        !learned.available ||
+        !Number.isFinite(learnedDirection) ||
+        !Number.isFinite(learned.targetSignedExcursionDeg) ||
+        !Number.isFinite(learned.experimentalTrainingToleranceDeg)
+      ) {
+        enterGuidedStage("complete");
+        enterGuidedPhase("complete", "CALIBRATION NEEDS ANOTHER RUN");
+        mark("session_end", {
+          outcome: "calibration_failed",
+          validCalibrationCount: learned.learnHoldCount,
+        });
+        await requireCue("p0_calibration_failed", { phase: "calibration" });
+        return;
+      }
+
+      learnedTargetRef.current = {
+        direction: learnedDirection as number,
+        excursionDeg: learned.targetSignedExcursionDeg as number,
+        toleranceDeg: learned.experimentalTrainingToleranceDeg as number,
+      };
+      mark("target_learned", {
+        direction: learnedDirection,
+        targetExcursionDeg: learned.targetSignedExcursionDeg,
+        toleranceDeg: learned.experimentalTrainingToleranceDeg,
+        betweenHoldSdDeg:
+          "betweenHoldDeltaSdDeg" in learned ? learned.betweenHoldDeltaSdDeg : null,
+        pooledWithinHoldSdDeg:
+          "pooledWithinHoldSdDeg" in learned ? learned.pooledWithinHoldSdDeg : null,
+        combinedSdDeg: "combinedSdDeg" in learned ? learned.combinedSdDeg : null,
+        method: "local_three_peak_delta_mean_combined_sd",
+        selectedHoldIndexes: learned.selectedHoldIndexes,
+      });
+      enterGuidedStage("practice");
+      enterGuidedPhase("practice", "COACHING • Three 10-second target holds");
+      if (!(await requireCue("p0_practice_intro", { phase: "practice" }))) return;
+
+      let completedPracticeCount = 0;
+      let practiceAttemptCount = 0;
+      const maximumPracticeAttempts = config.practiceHoldCount * 2;
+      while (
+        guidedRunningRef.current &&
+        completedPracticeCount < config.practiceHoldCount &&
+        practiceAttemptCount < maximumPracticeAttempts
+      ) {
+        practiceAttemptCount += 1;
+        const practiceNumber = completedPracticeCount + 1;
+        const meta: Record<string, unknown> = {
+          holdIndex: nextHoldIndex,
+          role: "practice",
+          practiceNumber,
+          practiceAttemptNumber: practiceAttemptCount,
+        };
+        const cycles = await waitForThreeCycles(meta, nextBreathingObservationStartMs, false);
+        if (!cycles || !guidedRunningRef.current) return;
+        if (previousMeta) {
+          mark("recovery_end", {
+            ...previousMeta,
+            readyForHoldIndex: nextHoldIndex,
+            source: "three_complete_regular_cycles",
+          });
+        }
+        const anchorPitch = cycles.meanInspiratoryPeakPitchDeg as number;
+        const target = learnedTargetRef.current;
+        setLiveGate({
+          mode: "practice",
+          anchorPitch,
+          direction: target.direction,
+          targetExcursionDeg: target.excursionDeg,
+          toleranceDeg: target.toleranceDeg,
+          label: `Coaching ${practiceNumber} of ${config.practiceHoldCount} • beam is on only inside green`,
+        });
+        enterGuidedPhase(
+          "inhale",
+          `DEEP BREATH • Coaching ${practiceNumber} of ${config.practiceHoldCount}`,
+          meta,
+        );
+        mark("inhale_start", meta);
+        const inhaleCuePromise = coach("p0_inhale", meta);
+        const onset = await waitForPhysiologicalHold(
+          meta,
+          anchorPitch,
+          cycles.meanAmplitudeDeg as number,
+          inhaleCuePromise,
+        );
+        const inhaleResult = await inhaleCuePromise;
+        if (inhaleResult !== "ended") {
+          guidedRunningRef.current = false;
+          return;
+        }
+        if (!onset) {
+          mark("practice_attempt_aborted", { ...meta, reason: "physiological_hold_not_detected" });
+          mark("release", { ...meta, reason: "physiological_hold_not_detected" });
+          enterGuidedPhase("release", "RELEASE • Hold not detected", meta);
+          if (!(await requireCue("p0_abort", meta))) return;
+          nextBreathingObservationStartMs = performance.now() - startedAtRef.current;
+          previousMeta = meta;
+          nextHoldIndex += 1;
+          continue;
+        }
+
+        enterGuidedPhase(
+          "hold",
+          `HOLD • Coaching ${practiceNumber} of ${config.practiceHoldCount}`,
+          meta,
+        );
+        markAt(onset.sessionMs, "hold_start", {
+          ...meta,
+          source: "physiological_hold_detection",
+          direction: target.direction,
+          localAnchorPitchDeg: anchorPitch,
+          normalPeakPitchesDeg: cycles.peaks!.map((peak) => peak.pitchDeg),
+          normalMeanAmplitudeDeg: cycles.meanAmplitudeDeg,
+          targetExcursionDeg: target.excursionDeg,
+          toleranceDeg: target.toleranceDeg,
+        });
+        const outcome = await runCoachedHold(meta, anchorPitch, target, onset.performanceMs);
+        mark("release", {
+          ...meta,
+          outcome: outcome.aborted ? "aborted_after_two_corrections" : "ten_second_hold_complete",
+          correctionCount: outcome.correctionCount,
+        });
+        if (outcome.aborted) {
+          enterGuidedPhase("release", "RELEASE • Two corrections were unsuccessful", meta);
+          if (!(await requireCue("p0_abort", meta))) return;
+        } else {
+          completedPracticeCount += 1;
+          mark("practice_hold_completed", {
+            ...meta,
+            completedPracticeCount,
+            requestedHoldSeconds: config.holdSeconds,
+            correctionCount: outcome.correctionCount,
+          });
+          enterGuidedPhase("release", "RELEASE • Breathe normally", meta);
+          if (!(await requireCue("p0_release", meta))) return;
+        }
+        nextBreathingObservationStartMs = performance.now() - startedAtRef.current;
+        previousMeta = meta;
+        nextHoldIndex += 1;
+      }
+
+      if (guidedRunningRef.current) {
+        setLiveGate(null);
+        enterGuidedStage("complete");
+        const completed = completedPracticeCount === config.practiceHoldCount;
+        enterGuidedPhase(
+          "complete",
+          completed
+            ? "COMPLETE • Calibration and coaching recorded"
+            : `COMPLETE • ${completedPracticeCount} of ${config.practiceHoldCount} coached holds completed`,
+        );
+        mark("session_end", {
+          outcome: completed ? "calibration_and_coaching_complete" : "practice_incomplete",
+          completedPracticeCount,
+          practiceAttemptCount,
+        });
+        await requireCue(
+          completed ? "p0_session_complete" : "p0_practice_incomplete",
+          { phase: "complete", completedPracticeCount },
+        );
+      }
+    } finally {
+      setGuidedActive(false);
+      setGuidedStage("idle");
+      setGuidedPhase("IDLE");
+      setGuidedLabel("");
+      setStepCountdown(0);
+      setLiveGate(null);
       guidedRunningRef.current = false;
       if (recordingRef.current) {
         await sleep(400);
@@ -1381,7 +2051,7 @@ export default function LabPage() {
               className="rounded px-1.5 py-0.5 text-[9px] uppercase tracking-wider"
               style={{ background: "#0c2d48", color: "#7dd3fc", border: "1px solid #0369a1" }}
             >
-              v0.7
+              v0.8
             </span>
           </h1>
           <a href="/" className="text-xs underline opacity-70">
@@ -1389,8 +2059,8 @@ export default function LabPage() {
           </a>
         </div>
         <p className="text-xs opacity-70 leading-relaxed">
-          A continuous observation run: 10 seconds of normal breathing, a deep breath and
-          10-second hold, then 10 seconds of normal breathing. Repeat three times.
+          Three local breathing peaks set each reference. Three 10-second calibration holds
+          learn the target delta and variability; three coached holds then simulate beam gating.
         </p>
 
         {!granted ? (
@@ -1416,7 +2086,7 @@ export default function LabPage() {
               <div className="flex items-center justify-between gap-3">
                 <div className="text-xs uppercase tracking-wider opacity-60">P0 guided run</div>
                 <div className="text-[10px] uppercase tracking-wider" style={{ color: "#38bdf8" }}>
-                  10s normal → 10s hold → repeat ×3
+                  3 breaths → calibrate ×3 → coach ×3
                 </div>
               </div>
               <GuidedJourney stage={guidedStage} />
@@ -1428,6 +2098,9 @@ export default function LabPage() {
                   active={guidedActive}
                   events={events}
                 />
+              )}
+              {liveGate && (
+                <LiveTargetGate pitch={pitch} gate={liveGate} phase={guidedPhase} />
               )}
               <div
                 className="rounded-md p-2 flex items-center justify-between gap-3"
@@ -1481,7 +2154,11 @@ export default function LabPage() {
                     </div>
                     <div className="text-xs opacity-70 mt-1 mb-1">{guidedLabel}</div>
                     <div className="text-3xl font-mono">
-                      {stepCountdown > 0 ? `${stepCountdown}s` : "…"}
+                      {guidedPhase === "REST"
+                        ? `${stepCountdown}/${3} breaths`
+                        : stepCountdown > 0
+                          ? `${stepCountdown}s`
+                          : "…"}
                     </div>
                   </div>
                   <button
@@ -1494,9 +2171,10 @@ export default function LabPage() {
                 </>
               )}
               <div className="text-[11px] opacity-60 leading-relaxed">
-                The sequence never rejects or repeats a breath. All three cycles and the
-                complete baseline-to-recovery trace are recorded; quality checks are shown
-                only after the run.
+                Every hold begins only after three complete regular cycles and physiological
+                hold detection. The 10-second clock never pauses; simulated beam time runs
+                only inside the green band. Two unsuccessful corrections return the patient
+                to three fresh breathing cycles before retrying.
               </div>
             </div>
 
@@ -1613,6 +2291,14 @@ export default function LabPage() {
                     value={`${last.analysis.summary.validHoldCount}/${last.analysis.summary.totalHoldCount}`}
                   />
                   <MiniStat
+                    label="target delta"
+                    value={`${last.analysis.summary.learnedTarget.targetSignedExcursionDeg ?? "—"}°`}
+                  />
+                  <MiniStat
+                    label="target half-range"
+                    value={`±${last.analysis.summary.learnedTarget.experimentalTrainingToleranceDeg ?? "—"}°`}
+                  />
+                  <MiniStat
                     label="pose SD"
                     value={`${last.analysis.summary.preholdPoseSdDeg ?? "—"}°`}
                   />
@@ -1706,7 +2392,7 @@ function GuidedJourney({ stage }: { stage: GuidedStage }) {
   const current = currentIndex >= 0 ? GUIDED_JOURNEY[currentIndex] : null;
   return (
     <div className="rounded-md p-2.5" style={{ background: "#0a0c10", border: "1px solid #303441" }}>
-      <div className="grid grid-cols-3 gap-1.5">
+      <div className="grid grid-cols-2 sm:grid-cols-4 gap-1.5">
         {GUIDED_JOURNEY.map((item, index) => {
           const isCurrent = index === currentIndex;
           const isComplete = currentIndex >= 0 && index < currentIndex;
@@ -1729,7 +2415,7 @@ function GuidedJourney({ stage }: { stage: GuidedStage }) {
       <div className="mt-2 text-[10px] leading-relaxed" style={{ color: current ? "#bae6fd" : "#a8a29e" }}>
         {current
           ? `Collecting now: ${current.data}.`
-          : "Journey: normal breathing → three identical hold cycles → review."}
+          : "Journey: three regular cycles → three calibrations → three coached holds → review."}
       </div>
     </div>
   );
@@ -1792,6 +2478,18 @@ function ContinuousBreathingTrace({
       ["inhale_start", "hold_start", "release"].includes(event.type) ||
       (event.type === "coach_cue" && event.meta?.cue === "p0_five_seconds_left"),
   );
+  const localPeakMarkers = events.flatMap((event) => {
+    if (event.type !== "breathing_cycles_qualified") return [];
+    const times = Array.isArray(event.meta?.peakTimesMs) ? event.meta.peakTimesMs : [];
+    return times
+      .map(Number)
+      .filter(Number.isFinite)
+      .map((time, index) => ({
+        time,
+        holdIndex: Number(event.meta?.holdIndex),
+        peakNumber: index + 1,
+      }));
+  });
   const markerLabel = (event: LabEvent) => {
     if (event.type === "inhale_start") return "DEEP BREATH";
     if (event.type === "hold_start") return "HOLD";
@@ -1810,7 +2508,7 @@ function ContinuousBreathingTrace({
       <div className="px-3 py-2 flex items-center justify-between gap-3 text-[10px] uppercase tracking-wider">
         <span>Continuous breathing trace</span>
         <span className="opacity-60">
-          inhale ↑ • range {minimum.toFixed(1)}° to {maximum.toFixed(1)}°
+          inhale ↑ • green dots = local peaks • {minimum.toFixed(1)}° to {maximum.toFixed(1)}°
         </span>
       </div>
       <div ref={scrollRef} className="overflow-x-auto" aria-label="Continuously growing breathing trace">
@@ -1876,6 +2574,29 @@ function ContinuousBreathingTrace({
               </text>
             </g>
           ))}
+          {localPeakMarkers.map((marker) => {
+            const nearest = history.reduce<{ t: number; excursion: number } | null>(
+              (best, point) =>
+                best == null || Math.abs(point.t - marker.time) < Math.abs(best.t - marker.time)
+                  ? point
+                  : best,
+              null,
+            );
+            if (!nearest) return null;
+            return (
+              <circle
+                key={`local-peak-${marker.holdIndex}-${marker.peakNumber}-${marker.time}`}
+                cx={xFor(marker.time)}
+                cy={yFor(nearest.excursion)}
+                r="3.5"
+                fill="#22c55e"
+                stroke="#bbf7d0"
+                strokeWidth="1"
+              >
+                <title>{`Local normal peak ${marker.peakNumber} before hold ${marker.holdIndex}`}</title>
+              </circle>
+            );
+          })}
           {path && (
             <path
               d={path}
@@ -1945,7 +2666,7 @@ function LiveTargetGate({
   const error = hasBand ? excursion - target : null;
   const inRange = error != null && Math.abs(error) <= (tolerance ?? 0);
   const status = !hasBand
-    ? "First hold establishes the green range"
+    ? "CALIBRATION • recording the full 10-second hold"
     : inRange
       ? phase === "HOLD"
         ? "IN RANGE • keep the blue bar here"

@@ -178,22 +178,34 @@ SD percentiles, ASCII traces, and answers the question "would the current
 algorithm have classified this hold as stable" — used heavily during
 threshold tuning.
 
-The current `dibh-lab/v3` guided harness is an unconditional three-cycle
-observation run. Recording begins with 10 seconds of normal breathing. Each
-cycle then says “Take a deep breath in and hold it for ten seconds,” records a
-10-second hold with a spoken five-seconds-left cue, says “Release and breathe
-normally,” and records 10 seconds of recovery. No setup rehearsal, calibration,
-target band, acquisition gate, correction, abort, or retry changes the sequence.
+The current `dibh-lab/v3` guided harness is a physiology-driven calibration and
+coaching run. Before every hold it waits for three complete, regular respiratory
+cycles and averages their inspiratory peaks to establish a local reference. It
+then detects the held plateau from the sensor trace rather than from audio
+completion and records a 10-second hold with a spoken five-seconds-left cue.
+
+Three calibration holds produce three local peak-to-hold deltas. Their mean is
+the session target. The target half-range combines between-hold SD with pooled
+within-hold variability, subject to a 0.5-degree sensor-noise floor and
+2.5-degree ceiling. Every coached hold recalculates its absolute target from a
+fresh three-cycle local reference, so phone-pose drift does not change the
+learned excursion target.
+
+The coached 10-second clock never pauses. Simulated beam time accumulates only
+while the trace is inside the target band. Sustained low or high drift receives
+at most two serialized corrections (“Breathe in a little more” or “Ease back
+slightly”). If both corrections fail, the hold aborts, the patient returns to
+normal breathing, and a retry cannot begin until three fresh cycles qualify.
 
 The live display is a continuously growing EKG-style trace from the first
 baseline sample through final recovery. With the charging port toward the face,
 inhalation is normalized upward. The horizontal strip retains all prior points
 and auto-scrolls, while the vertical scale expands when a deeper breath arrives.
 
-Lab P0 uses a dedicated prerecorded prompt set and awaits each MP3 before the
+Lab P0 uses a dedicated prerecorded prompt set and serializes each MP3 before the
 next instruction, with a bounded timeout so audio cannot freeze the runner.
 Audio is activated inside the motion and Start taps on mobile, and a Test voice
-control confirms playback before the run. If the opening prompt fails, the run
+control confirms playback before the run. If a required prompt fails, the run
 stops instead of continuing silently. All cues reuse that same activated audio
 element for iPhone reliability. A 10-second hold includes a spoken five-second
 remaining cue.
@@ -203,19 +215,18 @@ inhale, hold, release, and recovery motion.
 
 The export stores all 13 hardware channels plus EMA pitch, exact phase and
 coaching markers, versioned detector parameters, stable-segment boundaries,
-and separate metrics for phone-pose consistency, absolute plateau consistency,
-and phone-measured abdominal-excursion consistency. These are training proxies,
-not measurements of lung volume or treatment suitability. A breath-quality
-label is calculated only after all three cycles finish; it never suppresses
-visible motion or changes the run.
+and separate metrics for local anchors, calibration deltas, between-hold
+variability, within-hold drift, combined target range, time in range, longest
+beam-on interval, and correction response. These are training proxies, not
+measurements of lung volume or treatment suitability.
 
 ```bash
 pnpm lab:p0:check
 ```
 
-The synthetic check verifies that the P0 analyzer is deterministic, works when
-inhalation moves pitch in either direction, and preserves the learned relative
-target even when absolute resting phone pose shifts between attempts.
+The synthetic check verifies deterministic legacy replay, both phone-pitch
+directions, three-cycle detection, local-delta target calculation, combined
+variability, and coached time-in-range scoring.
 
 ### Analyzing a self-test session export
 

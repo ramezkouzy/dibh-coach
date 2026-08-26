@@ -183,24 +183,44 @@ A patient whose three Learn holds differ by < 0.5° gets the floor
 tolerance (tight); a patient whose holds vary widely (> 1° SD across the
 three) gets a more forgiving band so Practice is not impossible.
 
-### Lab P0.7 observation sequence
+### Lab P0.8 local-cycle calibration and coaching
 
-The live harness no longer makes a calibration or capture decision. It records
-10 seconds of normal breathing, then three identical cycles: a prerecorded deep
-breath-and-hold instruction, a 10-second hold with a cue at five seconds
-remaining, release, and 10 seconds of normal breathing. All cycles complete on
-the clock unless audio fails or the user cancels.
+The live harness records continuously and waits for three complete, regular
+sinusoidal cycles before every calibration or coaching hold. With inhalation
+normalized upward, it detects three inspiratory maxima with alternating troughs,
+checks period and amplitude consistency, and stores the mean of those three peak
+pitches as the attempt-local reference `Nᵢ`.
 
-The full pitch trace begins at the first baseline sample and grows horizontally
-through final recovery. For the instructed charging-port-toward-face placement,
-negative raw pitch change is normalized upward. The vertical display range is
-derived from all values observed so far and expands when the deep breath exceeds
-the normal-breathing amplitude.
+The deep-breath prompt and sensor detector run concurrently. A hold begins when
+the trace shows both a sufficient excursion beyond `Nᵢ` and a low-slope plateau
+for the required dwell; audio completion is not the hold boundary. The hold clock
+then runs continuously for 10 seconds and announces five seconds remaining.
 
-Post-run quality analysis still identifies a stable plateau, a fresh excursion
-of at least 1.5 degrees from the preceding two-second window, and baseline
-motion. These labels explain the signal but never hide movement, abort a hold,
-or repeat a cycle.
+For calibration hold `i`, every direction-normalized sample in the 10-second
+window becomes `Dᵢ(t) = direction × (pitch(t) - Nᵢ)`. The hold delta is the
+median of `Dᵢ(t)`. The target is the mean of the first three valid calibration
+deltas. The target half-range combines sample SD across the three deltas with
+pooled robust within-hold SD:
+
+```text
+between = sampleSD(delta1, delta2, delta3)
+within  = sqrt(mean(withinHoldRobustSD_i²))
+combined = sqrt(between² + within²)
+tolerance = clamp(combined, 0.5°, 2.5°)
+```
+
+Before each coached hold, a fresh three-peak mean translates the learned delta
+into the current phone pose. The independent 10-second clock never pauses.
+Simulated beam time is accumulated only inside the band. After one second
+outside, the patient receives “Breathe in a little more” below the band or “Ease
+back slightly” above it. The runner allows two serialized corrections with a
+response window after each. Two unsuccessful corrections abort to release;
+another attempt waits for three new complete respiratory cycles.
+
+The full pitch trace begins with the first sample and grows horizontally through
+all calibration, recovery, correction, retry, and coaching phases. Negative raw
+pitch change is normalized upward for the required charging-port-toward-face
+placement, and the vertical display expands when a deeper breath arrives.
 
 ---
 
