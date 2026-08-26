@@ -1172,13 +1172,21 @@ export default function LabPage() {
     >
       <div className="max-w-5xl w-full mx-auto flex flex-col gap-3">
         <div className="flex items-baseline justify-between">
-          <h1 className="text-lg font-semibold">DIBH Lab P0</h1>
+          <h1 className="text-lg font-semibold flex items-center gap-2">
+            DIBH Lab P0
+            <span
+              className="rounded px-1.5 py-0.5 text-[9px] uppercase tracking-wider"
+              style={{ background: "#0c2d48", color: "#7dd3fc", border: "1px solid #0369a1" }}
+            >
+              v0.4
+            </span>
+          </h1>
           <a href="/" className="text-xs underline opacity-70">
             ← coach
           </a>
         </div>
         <p className="text-xs opacity-70 leading-relaxed">
-          One rehearsal teaches the sequence, three valid calibration holds learn a
+          One rehearsal teaches the sequence, three matching calibration holds learn a
           comfortable relative target, and two coached practice holds test how well it can
           be reproduced.
         </p>
