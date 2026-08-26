@@ -108,18 +108,17 @@ per-phase reports work uniformly across both.
 ## v3 (current P0 measurement harness)
 
 `dibh-lab/v3` preserves the v2 raw channels, adds `betaEma`, and embeds a
-versioned deterministic analysis. Guided runs can record 3 or 5 repeated holds
-without touching the phone after Start:
-
-- 3 holds: calibration of a patient-specific relative excursion target
-- 5 holds: the first 3 are Learn-style references and the final 2 are
-  audio-guided Practice-style checks against the fixed learned target
+versioned deterministic analysis. A guided run is hands-free after Start and
+contains one unscored rehearsal, three valid Learn-style calibration holds,
+and two audio-guided Practice-style checks against the fixed learned target.
+An unclear calibration hold is recorded but rejected and repeated, up to six
+calibration attempts.
 
 ```json
 {
   "schema": "dibh-lab/v3",
   "sessionId": "33d87e61-79ee-45c7-9543-7c8d5e4e7405",
-  "appBuild": "lab-p0.2",
+  "appBuild": "lab-p0.3",
   "algorithm": {
     "id": "dibh-lab-p0",
     "version": "0.2.0",
@@ -131,9 +130,12 @@ without touching the phone after Start:
   },
   "protocol": {
     "mode": "guided",
+    "rehearsal": true,
     "holdSeconds": 10,
     "holdCount": 5,
     "learnHoldCount": 3,
+    "calibrationAttemptLimit": 6,
+    "practiceHoldCount": 2,
     "recoverySeconds": 20,
     "handsFree": true,
     "targetMethod": "median_relative_excursion"
@@ -145,14 +147,17 @@ without touching the phone after Start:
   ],
   "samples": [],
   "events": [
-    {"t": 0, "type": "baseline_start"},
-    {"t": 12800, "type": "baseline_end"},
-    {"t": 13600, "type": "prehold_start", "meta": {"holdIndex": 1, "role": "learn"}},
-    {"t": 15600, "type": "prehold_end", "meta": {"holdIndex": 1, "role": "learn"}},
-    {"t": 15600, "type": "inhale_start", "meta": {"holdIndex": 1, "role": "learn"}},
-    {"t": 20400, "type": "hold_start", "meta": {"holdIndex": 1, "role": "learn"}},
-    {"t": 41200, "type": "release", "meta": {"holdIndex": 1, "role": "learn"}},
-    {"t": 48000, "type": "recovery_end", "meta": {"holdIndex": 1, "role": "learn"}}
+    {"t": 0, "type": "guided_phase", "meta": {"phase": "setup"}},
+    {"t": 5, "type": "coach_cue", "meta": {"cue": "p0_session_intro"}},
+    {"t": 8240, "type": "coach_cue_end", "meta": {"cue": "p0_session_intro", "result": "ended"}},
+    {"t": 30000, "type": "baseline_start"},
+    {"t": 42000, "type": "baseline_end"},
+    {"t": 48600, "type": "prehold_start", "meta": {"holdIndex": 1, "role": "learn"}},
+    {"t": 50600, "type": "prehold_end", "meta": {"holdIndex": 1, "role": "learn"}},
+    {"t": 50600, "type": "inhale_start", "meta": {"holdIndex": 1, "role": "learn"}},
+    {"t": 55400, "type": "hold_start", "meta": {"holdIndex": 1, "role": "learn"}},
+    {"t": 65400, "type": "release", "meta": {"holdIndex": 1, "role": "learn"}},
+    {"t": 85400, "type": "recovery_end", "meta": {"holdIndex": 1, "role": "learn"}}
   ],
   "analysis": {
     "schema": "dibh-lab-analysis/v1",
@@ -199,18 +204,20 @@ anchor before the hold began. A hold is flagged when it does not show at least
 1.5 degrees of new movement in its learned direction; this makes a phone that
 was already near the target distinguishable from a new inhalation.
 
-For 5-hold runs, the final two holds also report absolute and excursion target
+The final two Practice holds also report absolute and excursion target
 error, target-acquisition time, whether their plateau falls inside the
 experimental band, their longest continuous stable-and-on-target run, whether
 that run reached the selected duration, and the audio guidance issued. If three
 valid calibration holds do not produce a target, practice stops rather than
 silently using an invalid target.
 
-Recovery is also hands-free. The runner waits for the configured minimum rest,
-then requires a low-variability, low-slope resting window to persist before the
-next inhale cue. `recovery_minimum_complete`, `rest_anchor_acquired`,
-`recovery_end`, `target_learned`, `target_acquired`, `target_enter`,
-`target_exit`, and `coach_cue` events make that control flow replayable.
+Recovery is also hands-free and ends at the configured duration. The final two
+seconds provide the next attempt's relaxed anchor; low-confidence anchors are
+flagged without silently extending the rest. `guided_phase`, `coach_cue`,
+`coach_cue_end`, `calibration_hold_accepted`, `calibration_hold_rejected`,
+`recovery_minimum_complete`, `rest_anchor_acquired`, `recovery_end`,
+`target_learned`, `target_acquired`, `target_enter`, and `target_exit` events
+make the complete instruction and measurement flow replayable.
 
 The embedded target band is explicitly named
 `experimentalTrainingToleranceDeg`. It is derived from typical within-hold

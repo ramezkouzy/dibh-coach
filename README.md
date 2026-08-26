@@ -121,7 +121,7 @@ app/
 │   │                         ← shared session analyzer
 │   └── audio.ts              ← phrase catalogue + playClip() helper
 ├── public/
-│   ├── audio/                ← 26 pre-recorded clips (Rachel voice)
+│   ├── audio/                ← checked-in prerecorded coaching clips
 │   └── tts-generator.html    ← in-browser regen tool (Puter.js)
 ├── scripts/
 │   ├── generate-tts.mjs      ← one-shot TTS generator
@@ -178,12 +178,18 @@ SD percentiles, ASCII traces, and answers the question "would the current
 algorithm have classified this hold as stable" — used heavily during
 threshold tuning.
 
-The current `dibh-lab/v3` guided harness is hands-free after Start. It records
-3 calibration holds or 3 calibration plus 2 practice holds, including a quiet
-prehold anchor for every attempt. The first three valid relative excursions set
-a fixed session target by robust median. Practice attempts receive audio cues
-to reach and maintain that target. A new attempt begins only after the selected
-minimum recovery and a stable relaxed-position anchor.
+The current `dibh-lab/v3` guided harness is hands-free after Start. One short
+rehearsal teaches REST, READY, INHALE, HOLD, and RELEASE before measurement.
+The harness then collects three valid calibration holds (repeating unclear
+attempts, up to six total) and runs two coached practice holds. Every attempt
+uses the final two seconds of its fixed recovery window as a quiet relative
+anchor. The first three valid excursions set a fixed session target by robust
+median; practice attempts receive audio cues to reach and maintain it.
+
+Lab P0 uses a dedicated prerecorded prompt set and awaits each MP3 before the
+next instruction. JSON exports record phase transitions plus prompt start/end
+events, allowing the trace view to align spoken instructions with measured
+inhale, hold, release, and recovery motion.
 
 The export stores all 13 hardware channels plus EMA pitch, exact phase and
 coaching markers, versioned detector parameters, stable-segment boundaries,

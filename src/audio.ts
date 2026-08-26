@@ -5,6 +5,26 @@
 // place; no app code changes.
 
 export const PHRASES = {
+  // Lab P0 protocol — one self-contained, prerecorded prompt set.
+  p0_session_intro:
+    "We will do one rehearsal, three calibration holds, and two coached practice holds. Follow rest, inhale, hold, and release.",
+  p0_rehearsal_intro: "First, one short rehearsal so you can learn the sequence.",
+  p0_calibration_intro:
+    "Calibration begins. Complete three comfortable deep breaths and hold each one steady.",
+  p0_practice_intro: "Calibration complete. Now match that breath depth for two practice holds.",
+  p0_rest: "Rest. Breathe normally.",
+  p0_ready: "Get ready. Your next deep breath starts in five seconds.",
+  p0_inhale: "Inhale now. Take one comfortable deep breath.",
+  p0_hold: "Hold now.",
+  p0_release: "Release. Breathe normally.",
+  p0_deeper: "Breathe in a little more.",
+  p0_ease_back: "Ease back slightly.",
+  p0_target: "Right there.",
+  p0_calibration_retry: "That breath was not clear enough to measure. We will repeat it.",
+  p0_calibration_failed:
+    "Calibration needs another run. Keep the phone still and follow inhale, hold, and release.",
+  p0_session_complete: "Practice complete. Great work.",
+
   // calibrate
   baseline_intro: "Breathe normally for twenty seconds.",
   placement_countdown: "Place the phone on your belly. The session begins in five seconds.",
@@ -55,20 +75,17 @@ export const PHRASES = {
 } as const;
 
 export type PhraseKey = keyof typeof PHRASES;
-
-// These new Lab-only prompts do not have checked-in MP3s yet. Speak them
-// directly instead of waiting for a predictable 404 before falling back.
-const WEB_SPEECH_ONLY = new Set<PhraseKey>([
-  "placement_countdown",
-  "baseline_intro_12",
-  "prepare_anchor",
-  "calibration_incomplete",
-]);
+export type AudioPlaybackResult = "ended" | "interrupted" | "failed";
 
 let cache: Partial<Record<PhraseKey, HTMLAudioElement>> = {};
-let currentlyPlaying: HTMLAudioElement | null = null;
 let unlocked = false;
 let playGeneration = 0;
+let activePlayback:
+  | {
+      audio: HTMLAudioElement;
+      finish: (result: AudioPlaybackResult) => void;
+    }
+  | null = null;
 
 // iOS requires audio to be triggered inside a user gesture once before
 // programmatic playback works. Call this from a click handler before the
@@ -87,59 +104,58 @@ export function unlockAudio() {
   }
 }
 
-function fallbackSpeak(text: string) {
-  if (typeof window === "undefined" || !window.speechSynthesis) return;
-  window.speechSynthesis.cancel();
-  const u = new SpeechSynthesisUtterance(text);
-  u.rate = 0.95;
-  window.speechSynthesis.speak(u);
+export function stopAudio() {
+  if (!activePlayback) return;
+  const { audio, finish } = activePlayback;
+  try {
+    audio.pause();
+    audio.currentTime = 0;
+  } catch {
+    // best-effort
+  }
+  finish("interrupted");
 }
 
-export function playClip(key: PhraseKey) {
-  if (typeof window === "undefined") return;
+export function playClip(key: PhraseKey): Promise<AudioPlaybackResult> {
+  if (typeof window === "undefined") return Promise.resolve("failed");
   const generation = ++playGeneration;
-  if (window.speechSynthesis) {
-    window.speechSynthesis.cancel();
-  }
-  // stop any playing clip
-  if (currentlyPlaying) {
-    try {
-      currentlyPlaying.pause();
-      currentlyPlaying.currentTime = 0;
-    } catch {
-      // ignore
-    }
-  }
-  if (WEB_SPEECH_ONLY.has(key)) {
-    fallbackSpeak(PHRASES[key]);
-    return;
-  }
+  stopAudio();
   let audio = cache[key];
   if (!audio) {
     audio = new Audio(`/audio/${key}.mp3`);
     audio.preload = "auto";
     cache[key] = audio;
   }
-  currentlyPlaying = audio;
   audio.currentTime = 0;
-  const p = audio.play();
-  if (p && typeof p.catch === "function") {
-    p.catch((error) => {
-      // Pausing an in-flight clip because a newer cue arrived rejects its
-      // play() promise in Safari/Chrome. That is intentional interruption,
-      // not a missing file, so do not speak the old phrase over the new one.
-      if (generation !== playGeneration || error?.name === "AbortError") return;
-      // File missing or autoplay blocked for the current cue — fall back to Web Speech.
-      fallbackSpeak(PHRASES[key]);
+  return new Promise((resolve) => {
+    let settled = false;
+    const finish = (result: AudioPlaybackResult) => {
+      if (settled) return;
+      settled = true;
+      audio.removeEventListener("ended", onEnded);
+      audio.removeEventListener("error", onError);
+      if (activePlayback?.audio === audio) activePlayback = null;
+      resolve(result);
+    };
+    const onEnded = () => finish("ended");
+    const onError = () => finish("failed");
+    audio.addEventListener("ended", onEnded, { once: true });
+    audio.addEventListener("error", onError, { once: true });
+    activePlayback = { audio, finish };
+    audio.play().catch((error) => {
+      if (generation !== playGeneration || error?.name === "AbortError") {
+        finish("interrupted");
+        return;
+      }
+      finish("failed");
     });
-  }
+  });
 }
 
 // Preload all clips. Call once after audio is unlocked. Best-effort.
 export function preloadAll() {
   if (typeof window === "undefined") return;
   for (const key of Object.keys(PHRASES) as PhraseKey[]) {
-    if (WEB_SPEECH_ONLY.has(key)) continue;
     if (!cache[key]) {
       const a = new Audio(`/audio/${key}.mp3`);
       a.preload = "auto";

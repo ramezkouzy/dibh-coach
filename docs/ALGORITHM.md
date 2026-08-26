@@ -187,19 +187,21 @@ three) gets a more forgiving band so Practice is not impossible.
 
 ## 9. Audio pipeline
 
-26 phrase keys, each backed by a pre-rendered MP3 in `public/audio/`.
+Every phrase key is backed by a pre-rendered MP3 in `public/audio/`.
 The phrases are named by event (e.g. `locked_in`, `go_deeper`,
 `learn_target_locked`) rather than by literal text, so re-recording with
 a different voice (Vranich, etc.) is a file-swap.
 
-Playback through a single `<audio>` element with cancel-on-new behaviour
-(a new cue stops the previous one). On iOS, audio is unlocked by a
+Playback is serialized through a single active `<audio>` element. Lab P0
+awaits each clip's `ended` event before advancing, while an explicit cancel or
+higher-priority cue can stop the active clip. On iOS, audio is unlocked by a
 `requestPermission`-coupled gesture on the Welcome screen — without that,
 non-interactive playback is blocked.
 
-If a clip is missing or autoplay is denied, the `playClip()` helper falls
-back to the browser's `SpeechSynthesis` for the same text. So the app is
-always usable, even before re-recording.
+Lab P0 has a dedicated, consistently voiced set for REST, READY, INHALE, HOLD,
+RELEASE, calibration, practice, correction, retry, and completion prompts.
+There is no system-voice fallback, preventing mixed voices and overlapping
+browser speech; missing or blocked audio is instead recorded as a failed cue.
 
 ---
 

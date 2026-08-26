@@ -88,9 +88,10 @@ export type TraceRecording = {
 type Point = { t: number; p: number };
 
 const FULL_WIDTH = 1000;
-const FULL_HEIGHT = 360;
+const FULL_HEIGHT = 430;
 const ALIGNED_HEIGHT = 300;
-const MARGIN = { left: 58, right: 18, top: 24, bottom: 42 };
+const FULL_MARGIN = { left: 58, right: 18, top: 118, bottom: 42 };
+const ALIGNED_MARGIN = { left: 58, right: 18, top: 34, bottom: 42 };
 
 export default function LabTrace({ recording }: { recording: TraceRecording }) {
   const model = useMemo(() => buildTraceModel(recording), [recording]);
@@ -127,7 +128,7 @@ export default function LabTrace({ recording }: { recording: TraceRecording }) {
           <Legend color="#a78bfa" label="hold" />
           <Legend color="#22c55e" label="stable" />
           <Legend color="#f59e0b" label="target band" />
-          <Legend color="#fb7185" label="audio coaching" />
+          <Legend color="#fb7185" label="prerecorded prompt" />
         </div>
         <svg
           viewBox={`0 0 ${FULL_WIDTH} ${FULL_HEIGHT}`}
@@ -136,19 +137,19 @@ export default function LabTrace({ recording }: { recording: TraceRecording }) {
           role="img"
           aria-labelledby="full-trace-title full-trace-desc"
         >
-          <title id="full-trace-title">Full session phone pitch trace</title>
+          <title id="full-trace-title">Session prompts and breath-hold timeline</title>
           <desc id="full-trace-desc">
-            Phone pitch over the full recording with breathing phases, stable segments, practice
-            target bands, and audio coaching events.
+            Direction-normalized phone motion over the full recording, with every prerecorded
+            prompt trigger, breathing phase, hold, stable segment, and practice target band.
           </desc>
           <ChartGrid model={model.fullChart} xUnit="s" yUnit="°" />
           {model.phases.map((phase, index) => (
             <rect
               key={`${phase.kind}-${index}`}
               x={model.fullChart.x(phase.startMs)}
-              y={MARGIN.top}
+              y={FULL_MARGIN.top}
               width={Math.max(1, model.fullChart.x(phase.endMs) - model.fullChart.x(phase.startMs))}
-              height={FULL_HEIGHT - MARGIN.top - MARGIN.bottom}
+              height={FULL_HEIGHT - FULL_MARGIN.top - FULL_MARGIN.bottom}
               fill={phaseColor(phase.kind)}
               opacity={phase.kind === "hold" ? 0.1 : 0.07}
             />
@@ -182,25 +183,34 @@ export default function LabTrace({ recording }: { recording: TraceRecording }) {
               <title>{segment.label}</title>
             </path>
           ))}
-          {model.coachingEvents.map((event) => (
+          {model.coachingEvents.map((event, index) => (
             <g key={`${event.t}-${String(event.meta?.cue ?? "cue")}`}>
               <line
                 x1={model.fullChart.x(event.t)}
                 x2={model.fullChart.x(event.t)}
-                y1={MARGIN.top}
-                y2={FULL_HEIGHT - MARGIN.bottom}
+                y1={promptLaneY(index) + 5}
+                y2={FULL_HEIGHT - FULL_MARGIN.bottom}
                 stroke="#fb7185"
-                strokeWidth="1.5"
-                strokeDasharray="5 4"
+                strokeWidth="1"
+                strokeDasharray="4 4"
               />
               <circle
                 cx={model.fullChart.x(event.t)}
-                cy={MARGIN.top + 8}
-                r="4"
+                cy={promptLaneY(index)}
+                r="3.5"
                 fill="#fb7185"
               >
                 <title>{coachLabel(event)}</title>
               </circle>
+              <text
+                x={model.fullChart.x(event.t)}
+                y={promptLaneY(index) - 6}
+                textAnchor="middle"
+                fill="#fda4af"
+                fontSize="9"
+              >
+                {promptLabel(event)}
+              </text>
             </g>
           ))}
           {recording.analysis.holds.map((hold) => {
@@ -210,7 +220,7 @@ export default function LabTrace({ recording }: { recording: TraceRecording }) {
               <text
                 key={`hold-label-${hold.index}`}
                 x={model.fullChart.x(start as number) + 5}
-                y={FULL_HEIGHT - MARGIN.bottom - 8}
+                y={FULL_HEIGHT - FULL_MARGIN.bottom - 8}
                 fill="#e7e5e4"
                 fontSize="12"
               >
@@ -222,7 +232,9 @@ export default function LabTrace({ recording }: { recording: TraceRecording }) {
       </div>
 
       <div>
-        <div className="mb-2 text-xs font-semibold">Holds aligned to each inhale</div>
+        <div className="mb-2 text-xs font-semibold">
+          Breath shape by hold — inhale rises, release falls toward zero
+        </div>
         <svg
           viewBox={`0 0 ${FULL_WIDTH} ${ALIGNED_HEIGHT}`}
           className="block w-full rounded-md"
@@ -232,8 +244,8 @@ export default function LabTrace({ recording }: { recording: TraceRecording }) {
         >
           <title id="aligned-title">Relative excursion comparison across holds</title>
           <desc id="aligned-desc">
-            Every hold is normalized to its own relaxed starting position so inhale depth and
-            maintenance can be compared despite changes in absolute phone angle.
+            Every hold is normalized to its own relaxed position and direction. Inhalation rises,
+            holding remains elevated, and exhalation after release falls toward zero.
           </desc>
           <ChartGrid model={model.alignedChart} xUnit="s" yUnit="°" height={ALIGNED_HEIGHT} />
           {target?.available && Number.isFinite(target.targetSignedExcursionDeg) &&
@@ -244,9 +256,9 @@ export default function LabTrace({ recording }: { recording: TraceRecording }) {
               const bottom = model.alignedChart.y(targetValue - tolerance);
               return (
                 <rect
-                  x={MARGIN.left}
+                  x={ALIGNED_MARGIN.left}
                   y={top}
-                  width={FULL_WIDTH - MARGIN.left - MARGIN.right}
+                  width={FULL_WIDTH - ALIGNED_MARGIN.left - ALIGNED_MARGIN.right}
                   height={Math.max(2, bottom - top)}
                   fill="#f59e0b"
                   opacity="0.16"
@@ -255,6 +267,27 @@ export default function LabTrace({ recording }: { recording: TraceRecording }) {
                 </rect>
               );
             })()}
+          {model.alignedPhaseMarkers.map((marker) => (
+            <g key={`phase-marker-${marker.label}`}>
+              <line
+                x1={model.alignedChart.x(marker.t)}
+                x2={model.alignedChart.x(marker.t)}
+                y1={ALIGNED_MARGIN.top}
+                y2={ALIGNED_HEIGHT - ALIGNED_MARGIN.bottom}
+                stroke={marker.color}
+                strokeWidth="1.2"
+                strokeDasharray="5 4"
+              />
+              <text
+                x={model.alignedChart.x(marker.t) + 4}
+                y={ALIGNED_MARGIN.top + 12}
+                fill={marker.color}
+                fontSize="10"
+              >
+                {marker.label}
+              </text>
+            </g>
+          ))}
           {model.alignedLines.map((line) => (
             <g key={`aligned-${line.index}`}>
               <path
@@ -268,7 +301,7 @@ export default function LabTrace({ recording }: { recording: TraceRecording }) {
                 <title>{`${line.role === "learn" ? "Learn" : "Practice"} hold ${line.index}`}</title>
               </path>
               <text
-                x={Math.min(FULL_WIDTH - MARGIN.right - 18, line.endX + 4)}
+                x={Math.min(FULL_WIDTH - ALIGNED_MARGIN.right - 18, line.endX + 4)}
                 y={line.endY}
                 fill={line.role === "learn" ? "#38bdf8" : "#a78bfa"}
                 fontSize="12"
@@ -350,9 +383,17 @@ function buildTraceModel(recording: TraceRecording) {
     .map((row) => ({ t: row[timeIndex], p: row[signalIndex] }))
     .filter((point): point is Point => Number.isFinite(point.t) && Number.isFinite(point.p))
     .sort((a, b) => a.t - b.t);
-  const sampled = downsample(points, 1100);
+  const directionCandidate =
+    recording.analysis.summary.learnedDirection ??
+    recording.analysis.holds.find((hold) => hold.valid && Number.isFinite(hold.direction))?.direction ??
+    recording.analysis.holds.find((hold) => Number.isFinite(hold.direction))?.direction;
+  const displayDirection = Number.isFinite(directionCandidate)
+    ? Math.sign(directionCandidate as number) || 1
+    : 1;
+  const displayPoints = points.map((point) => ({ ...point, p: displayDirection * point.p }));
+  const sampled = downsample(displayPoints, 1100);
   const durationMs = Math.max(recording.durationSec * 1000, points.at(-1)?.t ?? 0, 1);
-  const pitchValues = points.map((point) => point.p);
+  const pitchValues = displayPoints.map((point) => point.p);
   const pitchMin = Math.min(...pitchValues);
   const pitchMax = Math.max(...pitchValues);
   const pitchPad = Math.max(0.5, (pitchMax - pitchMin) * 0.08);
@@ -362,16 +403,20 @@ function buildTraceModel(recording: TraceRecording) {
     pitchMin - pitchPad,
     pitchMax + pitchPad,
     FULL_HEIGHT,
+    FULL_MARGIN,
   );
-  const phases = recording.analysis.holds.flatMap((hold) => {
-    const windows = hold.windows ?? {};
-    return [
-      phase("relax", windows.preholdStartMs, windows.preholdEndMs),
-      phase("inhale", windows.inhaleStartMs, windows.holdStartMs),
-      phase("hold", windows.holdStartMs, windows.releaseMs),
-      phase("recovery", windows.releaseMs, windows.recoveryEndMs),
-    ].filter((item): item is { kind: string; startMs: number; endMs: number } => item != null);
-  });
+  const recordedPhases = guidedPhases(recording.events, durationMs);
+  const phases = recordedPhases.length
+    ? recordedPhases
+    : recording.analysis.holds.flatMap((hold) => {
+        const windows = hold.windows ?? {};
+        return [
+          phase("relax", windows.preholdStartMs, windows.preholdEndMs),
+          phase("inhale", windows.inhaleStartMs, windows.holdStartMs),
+          phase("hold", windows.holdStartMs, windows.releaseMs),
+          phase("recovery", windows.releaseMs, windows.recoveryEndMs),
+        ].filter((item): item is { kind: string; startMs: number; endMs: number } => item != null);
+      });
   const learned = recording.analysis.summary.learnedTarget;
   const learnedDirection = recording.analysis.summary.learnedDirection;
   const targetBands = recording.analysis.holds
@@ -392,15 +437,15 @@ function buildTraceModel(recording: TraceRecording) {
         index: hold.index,
         startMs: hold.windows?.inhaleStartMs ?? 0,
         endMs: hold.windows?.releaseMs ?? 0,
-        lowPitch: anchor + direction * (target - tolerance),
-        highPitch: anchor + direction * (target + tolerance),
+        lowPitch: displayDirection * (anchor + direction * (target - tolerance)),
+        highPitch: displayDirection * (anchor + direction * (target + tolerance)),
         tolerance,
       };
     });
   const stablePaths = recording.analysis.holds.flatMap((hold) =>
     (hold.stableSegments ?? []).map((segment, index) => {
       const segmentPoints = downsample(
-        points.filter((point) => point.t >= segment.startMs && point.t <= segment.endMs),
+        displayPoints.filter((point) => point.t >= segment.startMs && point.t <= segment.endMs),
         250,
       );
       return {
@@ -413,35 +458,59 @@ function buildTraceModel(recording: TraceRecording) {
   const alignedSeries = recording.analysis.holds
     .map((hold) => {
       const start = hold.windows?.inhaleStartMs;
-      const end = hold.windows?.releaseMs;
+      const holdStart = hold.windows?.holdStartMs;
+      const release = hold.windows?.releaseMs;
+      const recoveryEnd = hold.windows?.recoveryEndMs;
       const anchor = hold.prehold?.medianPitchDeg;
-      const direction = learnedDirection ?? hold.direction;
-      if (![start, end, anchor, direction].every(Number.isFinite)) return null;
+      const direction = hold.direction ?? learnedDirection;
+      if (![start, release, anchor, direction].every(Number.isFinite)) return null;
+      const seriesStart = Math.max(
+        hold.windows?.preholdStartMs ?? (start as number) - 2000,
+        (start as number) - 2500,
+      );
+      const seriesEnd = Math.min(
+        Number.isFinite(recoveryEnd) ? (recoveryEnd as number) : (release as number) + 5000,
+        (release as number) + 5000,
+      );
       const series = points
-        .filter((point) => point.t >= (start as number) && point.t <= (end as number))
+        .filter((point) => point.t >= seriesStart && point.t <= seriesEnd)
         .map((point) => ({
           t: (point.t - (start as number)) / 1000,
           p: (direction as number) * (point.p - (anchor as number)),
         }));
-      return { hold, points: downsample(series, 450) };
+      return {
+        hold,
+        points: downsample(series, 520),
+        holdStartT: Number.isFinite(holdStart)
+          ? ((holdStart as number) - (start as number)) / 1000
+          : null,
+        releaseT: ((release as number) - (start as number)) / 1000,
+      };
     })
     .filter(
-      (item): item is { hold: TraceHold; points: Point[] } => item != null && item.points.length > 0,
+      (item): item is {
+        hold: TraceHold;
+        points: Point[];
+        holdStartT: number | null;
+        releaseT: number;
+      } => item != null && item.points.length > 0,
     );
   const alignedValues = alignedSeries.flatMap((item) => item.points.map((point) => point.p));
   if (Number.isFinite(learned?.targetSignedExcursionDeg)) {
     alignedValues.push(learned?.targetSignedExcursionDeg as number);
   }
+  const alignedMinT = Math.min(0, ...alignedSeries.flatMap((item) => item.points.map((point) => point.t)));
   const alignedMaxT = Math.max(1, ...alignedSeries.flatMap((item) => item.points.map((point) => point.t)));
   const alignedMin = Math.min(0, ...alignedValues);
   const alignedMax = Math.max(1, ...alignedValues);
   const alignedPad = Math.max(0.5, (alignedMax - alignedMin) * 0.1);
   const alignedChart = chartScale(
-    0,
+    alignedMinT,
     alignedMaxT,
     alignedMin - alignedPad,
     alignedMax + alignedPad,
     ALIGNED_HEIGHT,
+    ALIGNED_MARGIN,
   );
   const alignedLines = alignedSeries.map(({ hold, points: series }) => {
     const last = series.at(-1) as Point;
@@ -454,6 +523,19 @@ function buildTraceModel(recording: TraceRecording) {
       endY: alignedChart.y(last.p),
     };
   });
+  const alignedPhaseMarkers = [
+    { t: 0, label: "INHALE", color: "#38bdf8" },
+    {
+      t: medianNumber(alignedSeries.map((item) => item.holdStartT)),
+      label: "HOLD",
+      color: "#a78bfa",
+    },
+    {
+      t: medianNumber(alignedSeries.map((item) => item.releaseT)),
+      label: "RELEASE",
+      color: "#fb7185",
+    },
+  ].filter((marker): marker is { t: number; label: string; color: string } => Number.isFinite(marker.t));
   return {
     points,
     fullChart,
@@ -463,21 +545,30 @@ function buildTraceModel(recording: TraceRecording) {
     stablePaths,
     alignedChart,
     alignedLines,
+    alignedPhaseMarkers,
     coachingEvents: recording.events.filter((event) => event.type === "coach_cue"),
   };
 }
 
-function chartScale(xMin: number, xMax: number, yMin: number, yMax: number, height: number) {
-  const plotWidth = FULL_WIDTH - MARGIN.left - MARGIN.right;
-  const plotHeight = height - MARGIN.top - MARGIN.bottom;
+function chartScale(
+  xMin: number,
+  xMax: number,
+  yMin: number,
+  yMax: number,
+  height: number,
+  margin: { left: number; right: number; top: number; bottom: number },
+) {
+  const plotWidth = FULL_WIDTH - margin.left - margin.right;
+  const plotHeight = height - margin.top - margin.bottom;
   return {
     xMin,
     xMax,
     yMin,
     yMax,
     height,
-    x: (value: number) => MARGIN.left + ((value - xMin) / Math.max(0.001, xMax - xMin)) * plotWidth,
-    y: (value: number) => MARGIN.top + ((yMax - value) / Math.max(0.001, yMax - yMin)) * plotHeight,
+    margin,
+    x: (value: number) => margin.left + ((value - xMin) / Math.max(0.001, xMax - xMin)) * plotWidth,
+    y: (value: number) => margin.top + ((yMax - value) / Math.max(0.001, yMax - yMin)) * plotHeight,
   };
 }
 
@@ -494,19 +585,20 @@ function ChartGrid({
 }) {
   const xTicks = tickValues(model.xMin, model.xMax, 6);
   const yTicks = tickValues(model.yMin, model.yMax, 5);
+  const { margin } = model;
   return (
     <g aria-hidden="true">
       {yTicks.map((tick) => (
         <g key={`y-${tick}`}>
           <line
-            x1={MARGIN.left}
-            x2={FULL_WIDTH - MARGIN.right}
+            x1={margin.left}
+            x2={FULL_WIDTH - margin.right}
             y1={model.y(tick)}
             y2={model.y(tick)}
             stroke="#303441"
             strokeWidth="1"
           />
-          <text x={MARGIN.left - 8} y={model.y(tick) + 4} textAnchor="end" fill="#a8a29e" fontSize="11">
+          <text x={margin.left - 8} y={model.y(tick) + 4} textAnchor="end" fill="#a8a29e" fontSize="11">
             {tick.toFixed(1)}{yUnit}
           </text>
         </g>
@@ -516,14 +608,14 @@ function ChartGrid({
           <line
             x1={model.x(tick)}
             x2={model.x(tick)}
-            y1={MARGIN.top}
-            y2={height - MARGIN.bottom}
+            y1={margin.top}
+            y2={height - margin.bottom}
             stroke="#242833"
             strokeWidth="1"
           />
           <text
             x={model.x(tick)}
-            y={height - MARGIN.bottom + 20}
+            y={height - margin.bottom + 20}
             textAnchor="middle"
             fill="#a8a29e"
             fontSize="11"
@@ -557,16 +649,70 @@ function phase(kind: string, start?: number | null, end?: number | null) {
     : null;
 }
 
+function guidedPhases(events: TraceEvent[], durationMs: number) {
+  const transitions = events
+    .filter(
+      (event) =>
+        event.type === "guided_phase" &&
+        typeof event.meta?.phase === "string" &&
+        Number.isFinite(event.t),
+    )
+    .sort((a, b) => a.t - b.t);
+  return transitions
+    .map((event, index) => ({
+      kind: String(event.meta?.phase),
+      startMs: event.t,
+      endMs: transitions[index + 1]?.t ?? durationMs,
+    }))
+    .filter((item) => item.endMs > item.startMs);
+}
+
 function phaseColor(kind: string) {
   if (kind === "inhale") return "#38bdf8";
   if (kind === "hold") return "#a78bfa";
+  if (kind === "release") return "#fb7185";
+  if (kind === "ready") return "#f59e0b";
+  if (kind === "practice") return "#22c55e";
   return "#64748b";
+}
+
+function promptLaneY(index: number) {
+  return 24 + (index % 4) * 23;
+}
+
+function promptLabel(event: TraceEvent) {
+  const cue = String(event.meta?.cue ?? "audio");
+  const labels: Record<string, string> = {
+    p0_session_intro: "SESSION INTRO",
+    p0_rehearsal_intro: "REHEARSAL",
+    p0_calibration_intro: "CALIBRATION",
+    p0_practice_intro: "PRACTICE",
+    p0_rest: "REST",
+    p0_ready: "READY",
+    p0_inhale: "INHALE",
+    p0_hold: "HOLD",
+    p0_release: "RELEASE",
+    p0_deeper: "DEEPER",
+    p0_ease_back: "EASE BACK",
+    p0_target: "RIGHT THERE",
+    p0_calibration_retry: "REPEAT",
+    p0_calibration_failed: "RETRY SESSION",
+    p0_session_complete: "COMPLETE",
+  };
+  return labels[cue] ?? cue.replaceAll("_", " ").toUpperCase();
 }
 
 function coachLabel(event: TraceEvent) {
   const cue = String(event.meta?.cue ?? "audio coaching").replaceAll("_", " ");
   const hold = Number(event.meta?.holdIndex);
   return Number.isFinite(hold) ? `Hold ${hold}: ${cue}` : cue;
+}
+
+function medianNumber(values: Array<number | null | undefined>) {
+  const finite = values.filter((value): value is number => Number.isFinite(value)).sort((a, b) => a - b);
+  if (!finite.length) return Number.NaN;
+  const middle = Math.floor(finite.length / 2);
+  return finite.length % 2 ? finite[middle] : (finite[middle - 1] + finite[middle]) / 2;
 }
 
 function TraceStat({ label, value }: { label: string; value: string }) {
