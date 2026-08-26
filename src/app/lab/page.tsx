@@ -653,7 +653,7 @@ export default function LabPage() {
     const recordingBase = {
       schema: "dibh-lab/v3" as const,
       sessionId: sessionIdRef.current,
-      appBuild: "lab-p1.0",
+      appBuild: "lab-p1.1",
       algorithm: LAB_P0_ALGORITHM,
       scenario: activeScenarioRef.current,
       note,
@@ -2303,7 +2303,7 @@ export default function LabPage() {
               className="rounded px-1.5 py-0.5 text-[9px] uppercase tracking-wider"
               style={{ background: "#0c2d48", color: "#7dd3fc", border: "1px solid #0369a1" }}
             >
-              v1.0
+              v1.1
             </span>
           </h1>
           <a href="/" className="text-xs underline opacity-70">

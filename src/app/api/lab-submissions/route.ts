@@ -6,6 +6,12 @@ export const runtime = "nodejs";
 
 const MAX_BODY_BYTES = 4_000_000;
 
+function hasBlobStoreConfiguration() {
+  // New Vercel projects use short-lived OIDC credentials with BLOB_STORE_ID.
+  // BLOB_READ_WRITE_TOKEN remains supported for legacy store connections.
+  return Boolean(process.env.BLOB_STORE_ID || process.env.BLOB_READ_WRITE_TOKEN);
+}
+
 function json(body: Record<string, unknown>, status = 200) {
   return Response.json(body, {
     status,
@@ -32,14 +38,19 @@ function accessCodeMatches(received: string | null, expected: string) {
 export async function GET() {
   return json({
     ok: true,
-    configured: Boolean(process.env.BLOB_READ_WRITE_TOKEN),
+    configured: hasBlobStoreConfiguration(),
+    authentication: process.env.BLOB_STORE_ID
+      ? "vercel-oidc"
+      : process.env.BLOB_READ_WRITE_TOKEN
+        ? "read-write-token"
+        : null,
     accessCodeRequired: Boolean(process.env.DIBH_LAB_ACCESS_CODE),
     maxBytes: MAX_BODY_BYTES,
   });
 }
 
 export async function POST(request: Request) {
-  if (!process.env.BLOB_READ_WRITE_TOKEN) {
+  if (!hasBlobStoreConfiguration()) {
     return json(
       {
         ok: false,

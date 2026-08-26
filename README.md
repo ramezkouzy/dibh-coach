@@ -244,7 +244,9 @@ only writes to runtime logs and is not durable study storage.
 To enable central collection in Vercel:
 
 1. Open the linked `dibh-coach` project, create a **private Blob store**, and
-   connect it to Production. Vercel supplies `BLOB_READ_WRITE_TOKEN`.
+   connect it to Production. New Vercel projects use automatic short-lived OIDC
+   credentials plus `BLOB_STORE_ID`; legacy connections may instead supply
+   `BLOB_READ_WRITE_TOKEN`.
 2. Optionally add `DIBH_LAB_ACCESS_CODE` as a Production environment variable
    and give that shared code only to invited contributors.
 3. Redeploy. The Lab start screen will change from **JSON backup mode** to
