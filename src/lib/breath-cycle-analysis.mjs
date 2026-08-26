@@ -14,6 +14,15 @@ function mean(values) {
   return values.length ? values.reduce((sum, value) => sum + value, 0) / values.length : null;
 }
 
+function median(values) {
+  if (!values.length) return null;
+  const sorted = [...values].sort((a, b) => a - b);
+  const middle = Math.floor(sorted.length / 2);
+  return sorted.length % 2
+    ? sorted[middle]
+    : (sorted[middle - 1] + sorted[middle]) / 2;
+}
+
 function standardDeviation(values) {
   const center = mean(values);
   if (center == null || values.length < 2) return null;
@@ -86,6 +95,129 @@ function minimumBetween(points, startMs, endMs) {
     if (!result || point.x < result.x) result = point;
   }
   return result;
+}
+
+function linearSlopePerMinute(points) {
+  if (points.length < 2) return null;
+  const timeOrigin = points[0].t;
+  const xs = points.map((point) => (point.t - timeOrigin) / 60000);
+  const xMean = mean(xs);
+  const yMean = mean(points.map((point) => point.p));
+  if (xMean == null || yMean == null) return null;
+  let numerator = 0;
+  let denominator = 0;
+  for (let index = 0; index < points.length; index++) {
+    numerator += (xs[index] - xMean) * (points[index].p - yMean);
+    denominator += (xs[index] - xMean) ** 2;
+  }
+  return denominator > 0 ? numerator / denominator : 0;
+}
+
+/**
+ * Summarize a normal-breathing placement recording without applying any
+ * calibration or coaching thresholds. The first few seconds are intentionally
+ * excluded so moving the hand away from the phone does not inflate amplitude.
+ */
+export function analyzePositionSignal(inputPoints, options = {}) {
+  const direction = options.direction === 1 ? 1 : -1;
+  const requestedStartMs = Number.isFinite(options.startMs) ? options.startMs : 0;
+  const settlingMs = Number.isFinite(options.settlingMs) ? options.settlingMs : 3000;
+  const startMs = requestedStartMs + Math.max(0, settlingMs);
+  const endMs = Number.isFinite(options.endMs) ? options.endMs : Infinity;
+  const smoothingRadius = Number.isFinite(options.smoothingRadius)
+    ? Math.max(1, options.smoothingRadius)
+    : 3;
+
+  const buckets = new Map();
+  for (const point of inputPoints) {
+    if (
+      !Number.isFinite(point?.t) ||
+      !Number.isFinite(point?.p) ||
+      point.t < startMs ||
+      point.t > endMs
+    ) {
+      continue;
+    }
+    const bucket = Math.floor(point.t / 100) * 100;
+    const current = buckets.get(bucket) ?? { sum: 0, count: 0 };
+    current.sum += point.p;
+    current.count += 1;
+    buckets.set(bucket, current);
+  }
+  const binned = [...buckets.entries()]
+    .sort((a, b) => a[0] - b[0])
+    .map(([t, value]) => ({ t, p: value.sum / value.count }));
+  const durationSec = binned.length > 1 ? (binned.at(-1).t - binned[0].t) / 1000 : 0;
+
+  if (binned.length < 40) {
+    return {
+      enoughData: false,
+      analyzedDurationSec: round(durationSec, 1),
+      settlingSecondsExcluded: round(settlingMs / 1000, 1),
+      usableCycleCount: 0,
+      medianPeakToTroughAmplitudeDeg: null,
+      amplitudeCv: null,
+      medianCyclePeriodSec: null,
+      cyclePeriodCv: null,
+      estimatedBreathsPerMinute: null,
+      noiseRobustSdDeg: null,
+      noiseFloorDeg: 0.02,
+      amplitudeToNoiseRatio: null,
+      driftDegPerMinute: null,
+      direction,
+    };
+  }
+
+  const smoothed = binned.map((point, index) => {
+    const neighbors = binned.slice(
+      Math.max(0, index - smoothingRadius),
+      Math.min(binned.length, index + smoothingRadius + 1),
+    );
+    const p = mean(neighbors.map((item) => item.p));
+    return { t: point.t, p, x: direction * p };
+  });
+  const peaks = separatedPeaks(localExtrema(smoothed, 4, "max"), 1400);
+  const amplitudes = [];
+  const periods = [];
+
+  for (let index = 0; index < peaks.length - 1; index++) {
+    const first = peaks[index];
+    const second = peaks[index + 1];
+    const period = second.t - first.t;
+    if (period < 1500 || period > 8000) continue;
+    const trough = minimumBetween(smoothed, first.t, second.t);
+    if (!trough) continue;
+    const amplitude = (first.x + second.x) / 2 - trough.x;
+    if (amplitude < 0.05) continue;
+    amplitudes.push(amplitude);
+    periods.push(period);
+  }
+
+  const residuals = binned.map((point, index) => point.p - smoothed[index].p);
+  const residualCenter = median(residuals) ?? 0;
+  const noiseRobustSd = (median(residuals.map((value) => Math.abs(value - residualCenter))) ?? 0) * 1.4826;
+  const medianAmplitude = median(amplitudes);
+  const medianPeriod = median(periods);
+  const amplitudeToNoise =
+    medianAmplitude == null ? null : medianAmplitude / Math.max(noiseRobustSd, 0.02);
+
+  return {
+    enoughData: durationSec >= 15 && amplitudes.length >= 3,
+    analyzedDurationSec: round(durationSec, 1),
+    settlingSecondsExcluded: round(settlingMs / 1000, 1),
+    usableCycleCount: amplitudes.length,
+    medianPeakToTroughAmplitudeDeg: round(medianAmplitude),
+    amplitudeCv: round(coefficientOfVariation(amplitudes)),
+    medianCyclePeriodSec: medianPeriod == null ? null : round(medianPeriod / 1000),
+    cyclePeriodCv: round(coefficientOfVariation(periods)),
+    estimatedBreathsPerMinute:
+      medianPeriod == null || medianPeriod <= 0 ? null : round(60000 / medianPeriod, 1),
+    noiseRobustSdDeg: round(noiseRobustSd),
+    noiseFloorDeg: 0.02,
+    amplitudeToNoiseRatio: round(amplitudeToNoise, 1),
+    driftDegPerMinute: round(linearSlopePerMinute(smoothed)),
+    direction,
+  };
 }
 
 export function detectRegularBreathingCycles(inputPoints, options = {}) {

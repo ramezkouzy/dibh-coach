@@ -2,7 +2,10 @@
 import assert from "node:assert/strict";
 
 import { analyzeLabRecording } from "../src/lib/lab-p0-analysis.mjs";
-import { detectRegularBreathingCycles } from "../src/lib/breath-cycle-analysis.mjs";
+import {
+  analyzePositionSignal,
+  detectRegularBreathingCycles,
+} from "../src/lib/breath-cycle-analysis.mjs";
 
 const CHANNELS = [
   "t",
@@ -276,6 +279,25 @@ assert.equal(detectedCycles.ready, true, "three complete sinusoidal cycles shoul
 assert.equal(detectedCycles.peaks.length, 3);
 assert.ok(Math.abs(detectedCycles.meanInspiratoryPeakPitchDeg + 0.8) < 0.08);
 
+const positionSignal = (amplitude, noiseAmplitude = 0.02) =>
+  Array.from({ length: 2251 }, (_, index) => {
+    const t = index * 20;
+    return {
+      t,
+      p:
+        -amplitude * Math.sin((t / 4000) * Math.PI * 2) +
+        noiseAmplitude * Math.sin((t / 180) * Math.PI * 2) +
+        (t / 60000) * 0.08,
+    };
+  });
+const strongPosition = analyzePositionSignal(positionSignal(1.2), { direction: -1 });
+const weakPosition = analyzePositionSignal(positionSignal(0.22, 0.08), { direction: -1 });
+assert.equal(strongPosition.enoughData, true, "position study should qualify a 45-second trace");
+assert.ok(strongPosition.usableCycleCount >= 8);
+assert.ok(Math.abs(strongPosition.medianPeakToTroughAmplitudeDeg - 2.4) < 0.2);
+assert.ok(Math.abs(strongPosition.estimatedBreathsPerMinute - 15) < 0.5);
+assert.ok(strongPosition.amplitudeToNoiseRatio > weakPosition.amplitudeToNoiseRatio);
+
 const localProtocol = synthLocalCycleProtocol(-1);
 const localAnalysis = analyzeLabRecording(localProtocol);
 assert.equal(localAnalysis.summary.learnedTarget.available, true);
@@ -288,4 +310,4 @@ assert.equal(localAnalysis.summary.practice.length, 1);
 assert.ok(localAnalysis.summary.practice[0].percentInTargetRange > 95);
 assert.equal(localAnalysis.summary.practice[0].holdCompleted, true);
 
-console.log("Lab P0 synthetic replay checks passed for legacy directions, observation replay, three-cycle detection, local-delta calibration, and coached target timing.");
+console.log("Lab P0 synthetic replay checks passed for legacy directions, observation replay, three-cycle detection, position-signal comparison, local-delta calibration, and coached target timing.");

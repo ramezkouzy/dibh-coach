@@ -202,6 +202,22 @@ baseline sample through final recovery. With the charging port toward the face,
 inhalation is normalized upward. The horizontal strip retains all prior points
 and auto-scrolls, while the vertical scale expands when a deeper breath arrives.
 
+Free record also includes a separate **Position study** mode for comparing phone
+placement during normal breathing. Each run records a labeled body location,
+left/midline/right alignment, posture, phone-contact method, fixed phone
+orientation, and a standardized 30, 45, or 60-second duration. It contains no
+prompts, holds, calibration, targets, or coaching. The first three seconds are
+excluded as placement settling time.
+
+The position trace uses a tighter auto-scaling range so small quiet-breathing
+oscillations remain visible. Each downloaded JSON includes usable respiratory
+cycle count, median peak-to-trough amplitude, amplitude variability, breathing
+rate, robust high-frequency noise, amplitude-to-noise ratio, and pose drift.
+Completed runs remain in an on-page comparison; the placement with the highest
+amplitude-to-noise ratio among sufficiently long recordings is labeled the
+strongest measured signal. This is a phone-position signal-quality comparison,
+not a lung-volume or clinical-treatment measurement.
+
 Lab P0 uses a dedicated prerecorded prompt set and serializes each MP3 before the
 next instruction, with a bounded timeout so audio cannot freeze the runner.
 Audio is activated inside the motion and Start taps on mobile, and a Test voice
@@ -225,8 +241,8 @@ pnpm lab:p0:check
 ```
 
 The synthetic check verifies deterministic legacy replay, both phone-pitch
-directions, three-cycle detection, local-delta target calculation, combined
-variability, and coached time-in-range scoring.
+directions, three-cycle detection, position-signal comparison, local-delta
+target calculation, combined variability, and coached time-in-range scoring.
 
 ### Analyzing a self-test session export
 

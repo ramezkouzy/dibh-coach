@@ -3,7 +3,10 @@
 import { useEffect, useRef, useState, useCallback } from "react";
 import { playClip, stopAudio, unlockAudio } from "@/audio";
 import { analyzeLabRecording, LAB_P0_ALGORITHM } from "@/lib/lab-p0-analysis.mjs";
-import { detectRegularBreathingCycles } from "@/lib/breath-cycle-analysis.mjs";
+import {
+  analyzePositionSignal,
+  detectRegularBreathingCycles,
+} from "@/lib/breath-cycle-analysis.mjs";
 import LabTrace, { type TraceRecording } from "./LabTrace";
 
 // Schema v3: full multi-channel sensor capture plus the exact EMA pitch used
@@ -101,6 +104,40 @@ type LiveGate = {
   label: string;
 };
 
+type PositionSignalAnalysis = {
+  enoughData: boolean;
+  analyzedDurationSec: number | null;
+  settlingSecondsExcluded: number | null;
+  usableCycleCount: number;
+  medianPeakToTroughAmplitudeDeg: number | null;
+  amplitudeCv: number | null;
+  medianCyclePeriodSec: number | null;
+  cyclePeriodCv: number | null;
+  estimatedBreathsPerMinute: number | null;
+  noiseRobustSdDeg: number | null;
+  noiseFloorDeg: number;
+  amplitudeToNoiseRatio: number | null;
+  driftDegPerMinute: number | null;
+  direction: number;
+};
+
+type PositionStudy = {
+  mode: "normal_breathing_position_study";
+  locationId: string;
+  locationLabel: string;
+  alignment: "midline" | "left" | "right";
+  posture: "supine" | "reclined" | "seated";
+  attachment: "resting" | "light-contact" | "secured";
+  phoneOrientation: "flat_charging_port_toward_face";
+  requestedDurationSec: number;
+  analysis: PositionSignalAnalysis;
+};
+
+type PositionRun = PositionStudy & {
+  sessionId: string;
+  recordedAt: string;
+};
+
 type Recording = {
   schema: "dibh-lab/v3";
   sessionId: string;
@@ -131,6 +168,7 @@ type Recording = {
     phonePlacement: "charging_port_toward_face" | null;
     targetMethod: "local_three_peak_delta_mean_combined_sd" | "median_relative_excursion" | null;
   };
+  positionStudy: PositionStudy | null;
   samples: Sample[];
   events: LabEvent[];
   analysis: ReturnType<typeof analyzeLabRecording>;
@@ -162,6 +200,15 @@ const SCENARIOS = [
   "natural-breathing",
   "custom",
 ];
+
+const POSITION_LOCATIONS = [
+  ["upper-chest", "Upper chest / sternum"],
+  ["lower-chest", "Lower chest / xiphoid"],
+  ["upper-abdomen", "Upper abdomen"],
+  ["navel", "Mid abdomen / navel"],
+  ["lower-abdomen", "Lower abdomen"],
+  ["custom", "Custom location"],
+] as const;
 
 const FREE_EVENTS = [
   ["prehold_start", "Prehold start"],
@@ -225,6 +272,16 @@ export default function LabPage() {
   const [last, setLast] = useState<Recording | null>(null);
   const [imported, setImported] = useState<Recording | null>(null);
   const [importError, setImportError] = useState<string | null>(null);
+  const [freeMode, setFreeMode] = useState<"standard" | "position-study">("standard");
+  const [positionLocation, setPositionLocation] = useState<string>(POSITION_LOCATIONS[0][0]);
+  const [positionCustomLocation, setPositionCustomLocation] = useState("");
+  const [positionAlignment, setPositionAlignment] = useState<"midline" | "left" | "right">("midline");
+  const [positionPosture, setPositionPosture] = useState<"supine" | "reclined" | "seated">("supine");
+  const [positionAttachment, setPositionAttachment] = useState<"resting" | "light-contact" | "secured">("resting");
+  const [positionDurationSec, setPositionDurationSec] = useState(30);
+  const [positionTraceAnchorPitch, setPositionTraceAnchorPitch] = useState<number | null>(null);
+  const [positionTraceSessionStart, setPositionTraceSessionStart] = useState<number | null>(null);
+  const [positionRuns, setPositionRuns] = useState<PositionRun[]>([]);
 
   // ---- guided runner state -----------------------------------------------
   const [guidedActive, setGuidedActive] = useState(false);
@@ -249,6 +306,8 @@ export default function LabPage() {
   const activeScenarioRef = useRef<string>(SCENARIOS[0]);
   const recordingRef = useRef(false);
   const guidedConfigRef = useRef<GuidedConfig | null>(null);
+  const positionStudyRef = useRef<Omit<PositionStudy, "analysis"> | null>(null);
+  const positionTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const learnedTargetRef = useRef<LearnedTarget | null>(null);
   const betaEmaRef = useRef<number | null>(null);
   // Latest values from each event stream — combined on each tick.
@@ -286,6 +345,10 @@ export default function LabPage() {
   });
   const lastDispRef = useRef(0);
   const lastSampleAtRef = useRef(0);
+
+  useEffect(() => () => {
+    if (positionTimerRef.current) clearTimeout(positionTimerRef.current);
+  }, []);
 
   // ---- wake lock so the phone doesn't sleep during a recording ----------
   useEffect(() => {
@@ -490,12 +553,37 @@ export default function LabPage() {
     if (!recordingRef.current) return;
     recordingRef.current = false;
     setRecording(false);
+    if (positionTimerRef.current) {
+      clearTimeout(positionTimerRef.current);
+      positionTimerRef.current = null;
+    }
     const totalDur = (performance.now() - startedAtRef.current) / 1000;
     const guidedConfig = guidedConfigRef.current;
+    const positionStudyMeta = positionStudyRef.current;
+    if (positionStudyMeta) {
+      markAt(totalDur * 1000, "position_study_end", {
+        locationId: positionStudyMeta.locationId,
+        alignment: positionStudyMeta.alignment,
+        posture: positionStudyMeta.posture,
+        attachment: positionStudyMeta.attachment,
+      });
+    }
+    const positionAnalysis = positionStudyMeta
+      ? analyzePositionSignal(
+          samplesRef.current.flatMap((sample) => {
+            const samplePitch = sample[3] ?? sample[2];
+            return samplePitch == null ? [] : [{ t: sample[0], p: samplePitch }];
+          }),
+          { direction: -1, startMs: 0, endMs: totalDur * 1000, settlingMs: 3000 },
+        ) as PositionSignalAnalysis
+      : null;
+    const positionStudy = positionStudyMeta && positionAnalysis
+      ? { ...positionStudyMeta, analysis: positionAnalysis }
+      : null;
     const recordingBase = {
       schema: "dibh-lab/v3" as const,
       sessionId: sessionIdRef.current,
-      appBuild: "lab-p0.8",
+      appBuild: "lab-p0.9",
       algorithm: LAB_P0_ALGORITHM,
       scenario: activeScenarioRef.current,
       note,
@@ -531,6 +619,7 @@ export default function LabPage() {
           ? "local_three_peak_delta_mean_combined_sd" as const
           : null,
       },
+      positionStudy,
       samples: samplesRef.current,
       events: eventsRef.current,
       channels: [...CHANNELS] as Recording["channels"],
@@ -540,7 +629,51 @@ export default function LabPage() {
       analysis: analyzeLabRecording(recordingBase),
     };
     setLast(rec);
+    if (positionStudy) {
+      setPositionRuns((previous) => [
+        ...previous,
+        {
+          ...positionStudy,
+          sessionId: rec.sessionId,
+          recordedAt: rec.startedAt,
+        },
+      ]);
+    }
+    positionStudyRef.current = null;
     download(rec);
+  };
+
+  const startPositionStudy = () => {
+    const preset = POSITION_LOCATIONS.find(([id]) => id === positionLocation);
+    const locationLabel =
+      positionLocation === "custom"
+        ? positionCustomLocation.trim() || "Custom location"
+        : preset?.[1] ?? positionLocation;
+    const studyMeta: Omit<PositionStudy, "analysis"> = {
+      mode: "normal_breathing_position_study",
+      locationId: positionLocation,
+      locationLabel,
+      alignment: positionAlignment,
+      posture: positionPosture,
+      attachment: positionAttachment,
+      phoneOrientation: "flat_charging_port_toward_face",
+      requestedDurationSec: positionDurationSec,
+    };
+    positionStudyRef.current = studyMeta;
+    startRec(`position-${positionLocation}-${positionAlignment}-${positionDurationSec}s`, null);
+    setPositionTraceAnchorPitch(pitch);
+    setPositionTraceSessionStart(startedAtRef.current);
+    markAt(0, "position_study_start", {
+      locationId: studyMeta.locationId,
+      locationLabel: studyMeta.locationLabel,
+      alignment: studyMeta.alignment,
+      posture: studyMeta.posture,
+      attachment: studyMeta.attachment,
+      phoneOrientation: studyMeta.phoneOrientation,
+      requestedDurationSec: studyMeta.requestedDurationSec,
+      instruction: "breathe_normally",
+    });
+    positionTimerRef.current = setTimeout(stopRec, positionDurationSec * 1000);
   };
 
   // ---- guided runner ------------------------------------------------------
@@ -2051,7 +2184,7 @@ export default function LabPage() {
               className="rounded px-1.5 py-0.5 text-[9px] uppercase tracking-wider"
               style={{ background: "#0c2d48", color: "#7dd3fc", border: "1px solid #0369a1" }}
             >
-              v0.8
+              v0.9
             </span>
           </h1>
           <a href="/" className="text-xs underline opacity-70">
@@ -2183,30 +2316,154 @@ export default function LabPage() {
               className="rounded-lg p-3 flex flex-col gap-2"
               style={{ background: "#1c1f26", border: "1px solid #303441" }}
             >
-              <div className="text-xs uppercase tracking-wider opacity-60">Free record</div>
-              <select
-                value={scenario}
-                onChange={(e) => setScenario(e.target.value)}
-                disabled={recording}
-                className="rounded p-2 text-sm"
-                style={{ background: "#0a0c10", color: "#e7e5e4", border: "1px solid #303441" }}
-              >
-                {SCENARIOS.map((s) => (
-                  <option key={s} value={s}>
-                    {s}
-                  </option>
+              <div className="flex items-center justify-between gap-3">
+                <div className="text-xs uppercase tracking-wider opacity-60">Free record</div>
+                <div className="text-[10px] opacity-60">separate from guided calibration</div>
+              </div>
+              <div className="grid grid-cols-2 gap-1 rounded-md p-1" style={{ background: "#0a0c10" }}>
+                {([
+                  ["standard", "Standard"],
+                  ["position-study", "Position study"],
+                ] as const).map(([mode, label]) => (
+                  <button
+                    key={mode}
+                    onClick={() => setFreeMode(mode)}
+                    disabled={recording}
+                    className="rounded py-2 text-xs font-semibold disabled:opacity-40"
+                    style={{
+                      background: freeMode === mode ? "#0c2d48" : "transparent",
+                      color: freeMode === mode ? "#7dd3fc" : "#a8a29e",
+                      border: freeMode === mode ? "1px solid #0369a1" : "1px solid transparent",
+                    }}
+                  >
+                    {label}
+                  </button>
                 ))}
-              </select>
-              {scenario === "custom" && (
-                <input
-                  placeholder="custom scenario name"
-                  value={customScenario}
-                  onChange={(e) => setCustomScenario(e.target.value)}
-                  disabled={recording}
-                  className="rounded p-2 text-sm"
-                  style={{ background: "#0a0c10", color: "#e7e5e4", border: "1px solid #303441" }}
-                />
+              </div>
+
+              {freeMode === "standard" ? (
+                <>
+                  <select
+                    value={scenario}
+                    onChange={(e) => setScenario(e.target.value)}
+                    disabled={recording}
+                    className="rounded p-2 text-sm"
+                    style={{ background: "#0a0c10", color: "#e7e5e4", border: "1px solid #303441" }}
+                  >
+                    {SCENARIOS.map((s) => (
+                      <option key={s} value={s}>
+                        {s}
+                      </option>
+                    ))}
+                  </select>
+                  {scenario === "custom" && (
+                    <input
+                      placeholder="custom scenario name"
+                      value={customScenario}
+                      onChange={(e) => setCustomScenario(e.target.value)}
+                      disabled={recording}
+                      className="rounded p-2 text-sm"
+                      style={{ background: "#0a0c10", color: "#e7e5e4", border: "1px solid #303441" }}
+                    />
+                  )}
+                </>
+              ) : (
+                <>
+                  <div className="rounded-md p-2 text-[11px] leading-relaxed" style={{ background: "#071018", color: "#bae6fd", border: "1px solid #164e63" }}>
+                    Keep posture, phone orientation, attachment pressure, and duration the same.
+                    Breathe normally—there are no voice cues, holds, targets, or coaching in this mode.
+                    The first 3 seconds are excluded from analysis for placement settling.
+                  </div>
+                  <label className="text-[11px] opacity-70" htmlFor="position-location">Body location</label>
+                  <select
+                    id="position-location"
+                    value={positionLocation}
+                    onChange={(e) => setPositionLocation(e.target.value)}
+                    disabled={recording}
+                    className="rounded p-2 text-sm"
+                    style={{ background: "#0a0c10", color: "#e7e5e4", border: "1px solid #303441" }}
+                  >
+                    {POSITION_LOCATIONS.map(([id, label]) => (
+                      <option key={id} value={id}>{label}</option>
+                    ))}
+                  </select>
+                  {positionLocation === "custom" && (
+                    <input
+                      aria-label="Custom body location"
+                      placeholder="describe the exact body location"
+                      value={positionCustomLocation}
+                      onChange={(e) => setPositionCustomLocation(e.target.value)}
+                      disabled={recording}
+                      className="rounded p-2 text-sm"
+                      style={{ background: "#0a0c10", color: "#e7e5e4", border: "1px solid #303441" }}
+                    />
+                  )}
+                  <div className="grid grid-cols-2 gap-2">
+                    <label className="text-[11px] opacity-70 flex flex-col gap-1">
+                      Alignment
+                      <select
+                        value={positionAlignment}
+                        onChange={(e) => setPositionAlignment(e.target.value as "midline" | "left" | "right")}
+                        disabled={recording}
+                        className="rounded p-2 text-sm"
+                        style={{ background: "#0a0c10", color: "#e7e5e4", border: "1px solid #303441" }}
+                      >
+                        <option value="midline">Midline</option>
+                        <option value="left">Patient left</option>
+                        <option value="right">Patient right</option>
+                      </select>
+                    </label>
+                    <label className="text-[11px] opacity-70 flex flex-col gap-1">
+                      Recording length
+                      <select
+                        value={positionDurationSec}
+                        onChange={(e) => setPositionDurationSec(Number(e.target.value))}
+                        disabled={recording}
+                        className="rounded p-2 text-sm"
+                        style={{ background: "#0a0c10", color: "#e7e5e4", border: "1px solid #303441" }}
+                      >
+                        <option value={30}>30 seconds</option>
+                        <option value={45}>45 seconds</option>
+                        <option value={60}>60 seconds</option>
+                      </select>
+                    </label>
+                  </div>
+                  <div className="grid grid-cols-2 gap-2">
+                    <label className="text-[11px] opacity-70 flex flex-col gap-1">
+                      Posture
+                      <select
+                        value={positionPosture}
+                        onChange={(e) => setPositionPosture(e.target.value as "supine" | "reclined" | "seated")}
+                        disabled={recording}
+                        className="rounded p-2 text-sm"
+                        style={{ background: "#0a0c10", color: "#e7e5e4", border: "1px solid #303441" }}
+                      >
+                        <option value="supine">Lying flat</option>
+                        <option value="reclined">Reclined</option>
+                        <option value="seated">Seated</option>
+                      </select>
+                    </label>
+                    <label className="text-[11px] opacity-70 flex flex-col gap-1">
+                      Phone contact
+                      <select
+                        value={positionAttachment}
+                        onChange={(e) => setPositionAttachment(e.target.value as "resting" | "light-contact" | "secured")}
+                        disabled={recording}
+                        className="rounded p-2 text-sm"
+                        style={{ background: "#0a0c10", color: "#e7e5e4", border: "1px solid #303441" }}
+                      >
+                        <option value="resting">Resting, hands off</option>
+                        <option value="light-contact">Light hand contact</option>
+                        <option value="secured">Secured / strapped</option>
+                      </select>
+                    </label>
+                  </div>
+                  <div className="text-[11px] opacity-70 leading-relaxed">
+                    Phone: flat on the body, charging port toward the patient&apos;s face.
+                  </div>
+                </>
               )}
+
               <input
                 placeholder="note (optional)"
                 value={note}
@@ -2217,22 +2474,47 @@ export default function LabPage() {
               />
               {!recording ? (
                 <button
-                  onClick={() => startRec()}
+                  onClick={() => {
+                    if (freeMode === "position-study") {
+                      startPositionStudy();
+                    } else {
+                      positionStudyRef.current = null;
+                      startRec();
+                    }
+                  }}
                   className="rounded-md py-2.5 font-semibold"
-                  style={{ background: "#dc2626", color: "white" }}
+                  style={{ background: freeMode === "position-study" ? "#16a34a" : "#dc2626", color: "white" }}
                 >
-                  ● Start free record
+                  {freeMode === "position-study" ? "▶ Record this position" : "● Start free record"}
                 </button>
+              ) : guidedActive ? (
+                <div className="rounded-md py-2.5 text-center text-xs opacity-60" style={{ background: "#0a0c10" }}>
+                  Guided run is recording above
+                </div>
               ) : (
                 <button
                   onClick={stopRec}
                   className="rounded-md py-2.5 font-semibold"
                   style={{ background: "#0ea5e9", color: "white" }}
                 >
-                  ■ Stop & download
+                  {freeMode === "position-study"
+                    ? `■ Finish & analyze · ${Math.max(0, Math.ceil(positionDurationSec - duration))}s left`
+                    : "■ Stop & download"}
                 </button>
               )}
-              {recording && !guidedActive && (
+              {freeMode === "position-study" && positionTraceAnchorPitch != null && positionTraceSessionStart != null && (
+                <ContinuousBreathingTrace
+                  pitch={pitch}
+                  anchorPitch={positionTraceAnchorPitch}
+                  sessionStartedAt={positionTraceSessionStart}
+                  active={recording && !guidedActive}
+                  events={[]}
+                  title="Position breathing trace"
+                  description="normal breathing • inhale ↑ • auto-scaling"
+                  minimumHalfRangeDeg={0.15}
+                />
+              )}
+              {recording && !guidedActive && freeMode === "standard" && (
                 <div className="grid grid-cols-2 gap-2 mt-1">
                   {FREE_EVENTS.map(([type, label]) => (
                     <button
@@ -2247,6 +2529,10 @@ export default function LabPage() {
                 </div>
               )}
             </div>
+
+            {positionRuns.length > 0 && !recording && (
+              <PositionStudyComparison runs={positionRuns} />
+            )}
 
             {/* Events list */}
             {events.length > 0 && (
@@ -2273,6 +2559,13 @@ export default function LabPage() {
                 <div className="opacity-80">
                   {last.durationSec}s · {last.samples.length} samples · {last.events.length} events
                 </div>
+                {last.positionStudy && (
+                  <div className="mt-2 rounded p-2 leading-relaxed" style={{ background: "#071018", color: "#bae6fd", border: "1px solid #164e63" }}>
+                    Position study: {last.positionStudy.locationLabel} · {last.positionStudy.alignment}
+                    <br />
+                    {last.positionStudy.analysis.usableCycleCount} usable cycles · {last.positionStudy.analysis.medianPeakToTroughAmplitudeDeg ?? "—"}° amplitude · {last.positionStudy.analysis.amplitudeToNoiseRatio ?? "—"}× signal/noise
+                  </div>
+                )}
                 <div className="mt-2 grid grid-cols-2 gap-1.5">
                   <MiniStat
                     label="sample rate"
@@ -2421,18 +2714,131 @@ function GuidedJourney({ stage }: { stage: GuidedStage }) {
   );
 }
 
+function PositionStudyComparison({ runs }: { runs: PositionRun[] }) {
+  const setupVaries = new Set(
+    runs.map((run) => `${run.posture}|${run.attachment}|${run.requestedDurationSec}`),
+  ).size > 1;
+  const eligible = runs.filter(
+    (run) => run.analysis.enoughData && run.analysis.amplitudeToNoiseRatio != null,
+  );
+  const strongest = eligible.reduce<PositionRun | null>(
+    (best, run) =>
+      best == null ||
+      (run.analysis.amplitudeToNoiseRatio ?? -Infinity) >
+        (best.analysis.amplitudeToNoiseRatio ?? -Infinity)
+        ? run
+        : best,
+    null,
+  );
+  const degreeScale = Math.max(
+    0.25,
+    ...runs.flatMap((run) => [
+      run.analysis.medianPeakToTroughAmplitudeDeg ?? 0,
+      run.analysis.noiseRobustSdDeg ?? 0,
+    ]),
+  );
+  const pct = (value: number | null) =>
+    value == null ? 0 : Math.max(1.5, Math.min(100, (value / degreeScale) * 100));
+  const percent = (value: number | null) =>
+    value == null ? "—" : `${Math.round(value * 100)}%`;
+
+  return (
+    <div
+      className="rounded-lg p-3 flex flex-col gap-3"
+      style={{ background: "#1c1f26", border: "1px solid #303441" }}
+    >
+      <div className="flex items-start justify-between gap-3">
+        <div>
+          <div className="text-xs uppercase tracking-wider opacity-60">Position comparison</div>
+          <div className="mt-1 text-[11px] opacity-70 leading-relaxed">
+            Blue and pink bars share the same degree scale. Strongest signal means the highest
+            measured peak-to-trough amplitude divided by high-frequency noise, using a 0.02°
+            noise floor.
+          </div>
+        </div>
+        <div className="text-[10px] text-right shrink-0 opacity-60">{runs.length} recording{runs.length === 1 ? "" : "s"}</div>
+      </div>
+
+      {strongest && (
+        <div className="rounded-md p-2 text-xs" style={{ background: "#0d2b1a", color: "#bbf7d0", border: "1px solid #166534" }}>
+          Strongest measured signal so far: <span className="font-semibold">{strongest.locationLabel} · {strongest.alignment}</span>
+          {` (${strongest.analysis.amplitudeToNoiseRatio}× amplitude/noise)`}
+        </div>
+      )}
+      {setupVaries && (
+        <div className="rounded-md p-2 text-[10px] leading-relaxed" style={{ background: "#3a260f", color: "#fdba74", border: "1px solid #78350f" }}>
+          Posture, phone contact, or duration changed between recordings. Repeat with those
+          settings matched before treating the ranking as a fair location comparison.
+        </div>
+      )}
+
+      <div className="flex flex-col gap-3">
+        {runs.map((run, index) => {
+          const analysis = run.analysis;
+          const isStrongest = strongest?.sessionId === run.sessionId;
+          return (
+            <div
+              key={run.sessionId}
+              className="rounded-md p-2.5"
+              style={{ background: "#0a0c10", border: `1px solid ${isStrongest ? "#22c55e" : "#303441"}` }}
+            >
+              <div className="flex items-center justify-between gap-3 text-xs">
+                <span className="font-semibold">{index + 1}. {run.locationLabel} · {run.alignment}</span>
+                <span style={{ color: analysis.enoughData ? "#86efac" : "#fdba74" }}>
+                  {analysis.enoughData ? `${analysis.amplitudeToNoiseRatio ?? "—"}× signal/noise` : "needs more cycles"}
+                </span>
+              </div>
+              <div className="mt-1 text-[9px] opacity-55">
+                {run.posture} · {run.attachment} · {run.requestedDurationSec}s
+              </div>
+              <div className="mt-2 grid grid-cols-[68px_1fr_48px] gap-x-2 gap-y-1 items-center text-[10px]">
+                <span style={{ color: "#7dd3fc" }}>amplitude</span>
+                <div className="h-2 rounded-full overflow-hidden" style={{ background: "#172033" }}>
+                  <div className="h-full rounded-full" style={{ width: `${pct(analysis.medianPeakToTroughAmplitudeDeg)}%`, background: "#38bdf8" }} />
+                </div>
+                <span className="text-right">{analysis.medianPeakToTroughAmplitudeDeg ?? "—"}°</span>
+                <span style={{ color: "#fda4af" }}>noise</span>
+                <div className="h-2 rounded-full overflow-hidden" style={{ background: "#172033" }}>
+                  <div className="h-full rounded-full" style={{ width: `${pct(analysis.noiseRobustSdDeg)}%`, background: "#fb7185" }} />
+                </div>
+                <span className="text-right">{analysis.noiseRobustSdDeg ?? "—"}°</span>
+              </div>
+              <div className="mt-2 grid grid-cols-2 sm:grid-cols-4 gap-1.5 text-[10px]">
+                <MiniStat label="usable cycles" value={`${analysis.usableCycleCount}`} />
+                <MiniStat label="breathing rate" value={analysis.estimatedBreathsPerMinute == null ? "—" : `${analysis.estimatedBreathsPerMinute}/min`} />
+                <MiniStat label="amplitude variation" value={percent(analysis.amplitudeCv)} />
+                <MiniStat label="drift" value={analysis.driftDegPerMinute == null ? "—" : `${analysis.driftDegPerMinute}°/min`} />
+              </div>
+            </div>
+          );
+        })}
+      </div>
+      <div className="text-[10px] opacity-60 leading-relaxed">
+        This comparison ranks phone-position signal quality only. It does not determine lung
+        volume, treatment suitability, or the clinical target location.
+      </div>
+    </div>
+  );
+}
+
 function ContinuousBreathingTrace({
   pitch,
   anchorPitch,
   sessionStartedAt,
   active,
   events,
+  title = "Continuous breathing trace",
+  description,
+  minimumHalfRangeDeg = 1,
 }: {
   pitch: number;
   anchorPitch: number;
   sessionStartedAt: number;
   active: boolean;
   events: LabEvent[];
+  title?: string;
+  description?: string;
+  minimumHalfRangeDeg?: number;
 }) {
   const [history, setHistory] = useState<Array<{ t: number; excursion: number }>>([]);
   const scrollRef = useRef<HTMLDivElement | null>(null);
@@ -2458,8 +2864,8 @@ function ContinuousBreathingTrace({
   const lastMs = Math.max(history.at(-1)?.t ?? 0, events.at(-1)?.t ?? 0, 15000);
   const chartWidth = Math.max(360, pad.left + pad.right + (lastMs / 1000) * 18);
   const values = history.map((point) => point.excursion);
-  const observedMin = Math.min(-1, ...values);
-  const observedMax = Math.max(1, ...values);
+  const observedMin = Math.min(-minimumHalfRangeDeg, ...values);
+  const observedMax = Math.max(minimumHalfRangeDeg, ...values);
   const paddingDeg = Math.max(0.5, (observedMax - observedMin) * 0.12);
   const minimum = observedMin - paddingDeg;
   const maximum = observedMax + paddingDeg;
@@ -2506,9 +2912,9 @@ function ContinuousBreathingTrace({
   return (
     <div className="rounded-md overflow-hidden" style={{ background: "#0a0c10", border: "1px solid #303441" }}>
       <div className="px-3 py-2 flex items-center justify-between gap-3 text-[10px] uppercase tracking-wider">
-        <span>Continuous breathing trace</span>
+        <span>{title}</span>
         <span className="opacity-60">
-          inhale ↑ • green dots = local peaks • {minimum.toFixed(1)}° to {maximum.toFixed(1)}°
+          {description ?? "inhale ↑ • green dots = local peaks"} • {minimum.toFixed(1)}° to {maximum.toFixed(1)}°
         </span>
       </div>
       <div ref={scrollRef} className="overflow-x-auto" aria-label="Continuously growing breathing trace">
