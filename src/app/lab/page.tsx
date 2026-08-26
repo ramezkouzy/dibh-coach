@@ -2400,7 +2400,7 @@ export default function LabPage() {
                 />
                 <span>
                   I understand that the trace will contain the participant code, my notes,
-                  phone motion readings, and non-identifying browser/device characteristics.
+                  phone motion readings, and technical browser/device characteristics.
                   I will not enter personal health information in these fields.
                 </span>
               </label>
