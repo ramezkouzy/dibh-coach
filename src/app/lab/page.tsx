@@ -59,6 +59,17 @@ type LearnedTarget = {
   toleranceDeg: number;
 };
 
+type GuidedStage = "idle" | "setup" | "rehearsal" | "baseline" | "calibration" | "practice" | "complete";
+
+type LiveGate = {
+  mode: "calibration" | "practice";
+  anchorPitch: number;
+  direction: number;
+  targetExcursionDeg: number | null;
+  toleranceDeg: number | null;
+  label: string;
+};
+
 type Recording = {
   schema: "dibh-lab/v3";
   sessionId: string;
@@ -77,6 +88,8 @@ type Recording = {
     learnHoldCount: number | null;
     calibrationAttemptLimit: number | null;
     practiceHoldCount: number | null;
+    practiceAttemptLimit: number | null;
+    targetAcquisitionSeconds: number | null;
     recoverySeconds: number | null;
     handsFree: boolean;
     targetMethod: "median_relative_excursion" | null;
@@ -126,6 +139,50 @@ const FREE_EVENTS = [
   ["release", "Released"],
 ] as const;
 
+const GUIDED_JOURNEY: Array<{
+  id: Exclude<GuidedStage, "idle">;
+  title: string;
+  detail: string;
+  data: string;
+}> = [
+  {
+    id: "setup",
+    title: "1. Setup",
+    detail: "Place the phone and hear the plan.",
+    data: "Sensor access and phone placement",
+  },
+  {
+    id: "rehearsal",
+    title: "2. Rehearsal",
+    detail: "Learn REST, INHALE, HOLD, RELEASE.",
+    data: "Unscored instruction timing",
+  },
+  {
+    id: "baseline",
+    title: "3. Baseline",
+    detail: "Breathe normally for 12 seconds.",
+    data: "Resting motion and sensor noise",
+  },
+  {
+    id: "calibration",
+    title: "4. Calibration",
+    detail: "Collect three matching holds.",
+    data: "Repeatable inhale depth and stability",
+  },
+  {
+    id: "practice",
+    title: "5. Practice",
+    detail: "Place blue in green and hold.",
+    data: "Acquisition, drift, corrections, duration",
+  },
+  {
+    id: "complete",
+    title: "6. Review",
+    detail: "Download and inspect both traces.",
+    data: "Calibration and practice comparison",
+  },
+];
+
 export default function LabPage() {
   // ---- sensor state -------------------------------------------------------
   const [granted, setGranted] = useState(false);
@@ -146,11 +203,13 @@ export default function LabPage() {
 
   // ---- guided runner state -----------------------------------------------
   const [guidedActive, setGuidedActive] = useState(false);
+  const [guidedStage, setGuidedStage] = useState<GuidedStage>("idle");
   const [guidedPhase, setGuidedPhase] = useState<string>("IDLE");
   const [guidedLabel, setGuidedLabel] = useState<string>("");
   const [guidedHoldSec, setGuidedHoldSec] = useState<number>(10);
   const [guidedRecoverySec, setGuidedRecoverySec] = useState<number>(20);
   const [stepCountdown, setStepCountdown] = useState<number>(0);
+  const [liveGate, setLiveGate] = useState<LiveGate | null>(null);
 
   // ---- refs ---------------------------------------------------------------
   const samplesRef = useRef<Sample[]>([]);
@@ -358,6 +417,7 @@ export default function LabPage() {
       sc ?? (scenario === "custom" && customScenario ? customScenario : scenario);
     guidedConfigRef.current = guidedConfig ?? null;
     learnedTargetRef.current = null;
+    setLiveGate(null);
     recordingRef.current = true;
     lastSampleAtRef.current = 0;
     setDuration(0);
@@ -399,7 +459,7 @@ export default function LabPage() {
     const recordingBase = {
       schema: "dibh-lab/v3" as const,
       sessionId: sessionIdRef.current,
-      appBuild: "lab-p0.3",
+      appBuild: "lab-p0.4",
       algorithm: LAB_P0_ALGORITHM,
       scenario: activeScenarioRef.current,
       note,
@@ -414,6 +474,8 @@ export default function LabPage() {
         learnHoldCount: guidedConfig ? Math.min(3, guidedConfig.holdCount) : null,
         calibrationAttemptLimit: guidedConfig ? 6 : null,
         practiceHoldCount: guidedConfig ? Math.max(0, guidedConfig.holdCount - 3) : null,
+        practiceAttemptLimit: guidedConfig ? 4 : null,
+        targetAcquisitionSeconds: guidedConfig ? 5 : null,
         recoverySeconds: guidedConfig?.recoverySeconds ?? null,
         handsFree: Boolean(guidedConfig),
         targetMethod: guidedConfig ? ("median_relative_excursion" as const) : null,
@@ -432,6 +494,11 @@ export default function LabPage() {
 
   // ---- guided runner ------------------------------------------------------
   const guidedRunningRef = useRef(false);
+
+  const enterGuidedStage = (stage: GuidedStage) => {
+    setGuidedStage(stage);
+    mark("guided_stage", { stage });
+  };
 
   const enterGuidedPhase = (
     phase: string,
@@ -466,47 +533,61 @@ export default function LabPage() {
     if (announceRest) await coach("p0_rest", meta);
     const endAt = restStartedAt + seconds * 1000;
     let readyPlayed = false;
+    let capturedAnchor:
+      | {
+          pitch: number | null;
+          stable: boolean;
+        }
+      | null = null;
+    const captureAnchor = () => {
+      const captureAtMs = performance.now() - startedAtRef.current;
+      const latest = recentPitchStats(
+        samplesRef.current,
+        captureAtMs,
+        LAB_P0_ALGORITHM.params.restingWindowMs,
+      );
+      const startMs = latest?.startMs ?? Math.max(0, captureAtMs - 2000);
+      const stable = Boolean(
+        latest &&
+          latest.sdDeg <= LAB_P0_ALGORITHM.params.restingSdCeilingDeg &&
+          Math.abs(latest.slopeDegPerSec) <= LAB_P0_ALGORITHM.params.restingSlopeCeilingDegPerSec,
+      );
+      markAt(startMs, "prehold_start", meta);
+      markAt(captureAtMs, "prehold_end", {
+        ...meta,
+        source: "pre_ready_rest_window",
+        sdDeg: latest?.sdDeg ?? null,
+        slopeDegPerSec: latest?.slopeDegPerSec ?? null,
+        stable,
+      });
+      markAt(captureAtMs, "rest_anchor_acquired", {
+        ...meta,
+        source: "pre_ready_rest_window",
+        pitchDeg: latest?.medianPitchDeg ?? null,
+        sdDeg: latest?.sdDeg ?? null,
+        slopeDegPerSec: latest?.slopeDegPerSec ?? null,
+        stable,
+      });
+      if (!stable) mark("rest_anchor_low_confidence", meta);
+      return {
+        pitch: latest?.medianPitchDeg ?? oRef.current.betaEma ?? oRef.current.beta,
+        stable,
+      };
+    };
     while (guidedRunningRef.current && performance.now() < endAt) {
       const remainingMs = endAt - performance.now();
       if (!readyPlayed && remainingMs <= 5000) {
         readyPlayed = true;
+        capturedAnchor = captureAnchor();
         enterGuidedPhase("ready", "READY • Deep breath in five seconds", meta);
         await coach("p0_ready", meta);
       }
       setStepCountdown(Math.max(1, Math.ceil((endAt - performance.now()) / 1000)));
       await sleep(150);
     }
-    const nowMs = performance.now() - startedAtRef.current;
-    const latest = recentPitchStats(
-      samplesRef.current,
-      nowMs,
-      LAB_P0_ALGORITHM.params.restingWindowMs,
-    );
-    const startMs = latest?.startMs ?? Math.max(0, nowMs - 2000);
-    const isStable = Boolean(
-      latest &&
-        latest.sdDeg <= LAB_P0_ALGORITHM.params.restingSdCeilingDeg &&
-        Math.abs(latest.slopeDegPerSec) <= LAB_P0_ALGORITHM.params.restingSlopeCeilingDegPerSec,
-    );
-    markAt(startMs, "prehold_start", meta);
-    markAt(nowMs, "prehold_end", {
-      ...meta,
-      source: "fixed_rest_window",
-      sdDeg: latest?.sdDeg ?? null,
-      slopeDegPerSec: latest?.slopeDegPerSec ?? null,
-      stable: isStable,
-    });
-    markAt(nowMs, "rest_anchor_acquired", {
-      ...meta,
-      source: "fixed_rest_window",
-      pitchDeg: latest?.medianPitchDeg ?? null,
-      sdDeg: latest?.sdDeg ?? null,
-      slopeDegPerSec: latest?.slopeDegPerSec ?? null,
-      stable: isStable,
-    });
-    if (!isStable) mark("rest_anchor_low_confidence", meta);
+    capturedAnchor ??= captureAnchor();
     setStepCountdown(0);
-    return latest?.medianPitchDeg ?? oRef.current.betaEma ?? oRef.current.beta;
+    return capturedAnchor.pitch;
   };
 
   const currentAnalysis = () => {
@@ -521,17 +602,39 @@ export default function LabPage() {
     });
   };
 
+  const provisionalCalibrationGate = () => {
+    const analysis = currentAnalysis();
+    const candidates = analysis.holds.filter(
+      (hold: { role: string; valid: boolean; relativeExcursionDeg?: number | null }) =>
+        hold.role === "learn" && hold.valid && Number.isFinite(hold.relativeExcursionDeg),
+    );
+    const excursions = candidates.map(
+      (hold: { relativeExcursionDeg: number }) => hold.relativeExcursionDeg,
+    );
+    const target = medianClient(excursions);
+    return {
+      direction: Number.isFinite(analysis.summary.learnedDirection)
+        ? (analysis.summary.learnedDirection as number)
+        : 1,
+      target,
+      tolerance:
+        target == null ? null : Math.min(1.25, Math.max(0.75, target * 0.2)),
+      candidateCount: candidates.length,
+    };
+  };
+
   const acquirePracticeTarget = async (
     meta: Record<string, unknown>,
     anchorPitch: number,
     target: LearnedTarget,
+    deadline: number,
   ) => {
     const started = performance.now();
-    const deadline = started + 8000;
     let inBandSince: number | null = null;
-    let lastCueAt = 0;
+    let correctionIssued = false;
     while (guidedRunningRef.current && performance.now() < deadline) {
       const now = performance.now();
+      setStepCountdown(Math.max(1, Math.ceil((deadline - now) / 1000)));
       const currentPitch = oRef.current.betaEma ?? oRef.current.beta;
       if (currentPitch == null) {
         await sleep(150);
@@ -559,10 +662,8 @@ export default function LabPage() {
         }
       } else {
         inBandSince = null;
-        if (
-          now - started >= 1500 &&
-          now - lastCueAt >= LAB_P0_ALGORITHM.params.targetCueCooldownMs
-        ) {
+        if (!correctionIssued && now - started >= 1800) {
+          correctionIssued = true;
           const cue = error < 0 ? "p0_deeper" : "p0_ease_back";
           await coach(cue, {
             ...meta,
@@ -571,11 +672,11 @@ export default function LabPage() {
             targetExcursionDeg: target.excursionDeg,
             errorDeg: roundClient(error),
           });
-          lastCueAt = now;
         }
       }
       await sleep(150);
     }
+    setStepCountdown(0);
     mark("target_acquisition_timeout", {
       ...meta,
       targetExcursionDeg: target.excursionDeg,
@@ -589,12 +690,12 @@ export default function LabPage() {
     meta: Record<string, unknown>,
     anchorPitch: number,
     target: LearnedTarget,
+    holdStartedAt: number,
   ) => {
-    const started = performance.now();
-    const deadline = started + seconds * 1000;
-    let wasInBand = true;
+    const deadline = holdStartedAt + seconds * 1000;
+    let wasInBand: boolean | null = null;
     let outOfBandSince: number | null = null;
-    let lastCueAt = started;
+    let correctionIssued = false;
     setGuidedLabel(`HOLD • Practice ${meta.practiceNumber} of 2`);
     while (guidedRunningRef.current && performance.now() < deadline) {
       const now = performance.now();
@@ -604,7 +705,7 @@ export default function LabPage() {
         const excursion = target.direction * (currentPitch - anchorPitch);
         const error = excursion - target.excursionDeg;
         const inBand = Math.abs(error) <= target.toleranceDeg;
-        if (inBand !== wasInBand) {
+        if (wasInBand != null && inBand !== wasInBand) {
           mark(inBand ? "target_enter" : "target_exit", {
             ...meta,
             measuredExcursionDeg: roundClient(excursion),
@@ -614,9 +715,11 @@ export default function LabPage() {
         }
         if (inBand) {
           outOfBandSince = null;
+          correctionIssued = false;
         } else {
           outOfBandSince ??= now;
-          if (now - outOfBandSince >= 1500 && now - lastCueAt >= 4000) {
+          if (!correctionIssued && now - outOfBandSince >= 1200) {
+            correctionIssued = true;
             await coach(error < 0 ? "p0_deeper" : "p0_ease_back", {
               ...meta,
               reason: error < 0 ? "drifted_below_target" : "drifted_above_target",
@@ -624,13 +727,25 @@ export default function LabPage() {
               targetExcursionDeg: target.excursionDeg,
               errorDeg: roundClient(error),
             });
-            lastCueAt = now;
+          }
+          if (outOfBandSince != null && performance.now() - outOfBandSince >= 3500) {
+            mark("practice_hold_aborted", {
+              ...meta,
+              reason: error < 0 ? "sustained_below_target" : "sustained_above_target",
+              measuredExcursionDeg: roundClient(excursion),
+              targetExcursionDeg: target.excursionDeg,
+              errorDeg: roundClient(error),
+            });
+            setStepCountdown(0);
+            return false;
           }
         }
+        wasInBand = inBand;
       }
       await sleep(200);
     }
     setStepCountdown(0);
+    return guidedRunningRef.current;
   };
 
   const startGuided = async () => {
@@ -649,10 +764,12 @@ export default function LabPage() {
     setGuidedActive(true);
     guidedRunningRef.current = true;
     try {
+      enterGuidedStage("setup");
       enterGuidedPhase("setup", "SETUP • Place phone flat on your belly");
       await coach("p0_session_intro", { phase: "setup" });
       await waitGuidedSeconds(3, "SETUP • Place phone flat on your belly");
 
+      enterGuidedStage("rehearsal");
       enterGuidedPhase("rehearsal", "REHEARSAL • Learn the four cues");
       await coach("p0_rehearsal_intro", { phase: "rehearsal" });
       const rehearsalMeta = { holdIndex: 0, role: "rehearsal" };
@@ -664,38 +781,44 @@ export default function LabPage() {
       await coach("p0_inhale", rehearsalMeta);
       await waitUntil(rehearsalInhaleAt + 4000, "INHALE • Rehearsal");
       enterGuidedPhase("hold", "HOLD • Rehearsal", rehearsalMeta);
-      await coach("p0_hold", rehearsalMeta);
+      const rehearsalHoldAt = performance.now();
       mark("rehearsal_hold_start", rehearsalMeta);
-      await waitGuidedSeconds(5, "HOLD • Rehearsal");
+      await coach("p0_hold", rehearsalMeta);
+      await waitUntil(rehearsalHoldAt + 5000, "HOLD • Rehearsal");
       mark("rehearsal_release", rehearsalMeta);
       enterGuidedPhase("release", "RELEASE • Rehearsal", rehearsalMeta);
       await coach("p0_release", rehearsalMeta);
       enterGuidedPhase("rest", "REST • Breathe normally", rehearsalMeta);
       await waitGuidedSeconds(8, "REST • Breathe normally");
 
+      enterGuidedStage("baseline");
       mark("baseline_start");
       enterGuidedPhase("baseline", "BASELINE • Breathe normally");
       await coach("p0_rest", { phase: "baseline" });
       await waitGuidedSeconds(12, "BASELINE • Breathe normally");
       mark("baseline_end");
-      enterGuidedPhase("calibration", "CALIBRATION • Three valid holds");
+      enterGuidedStage("calibration");
+      enterGuidedPhase("calibration", "CALIBRATION • Three matching holds");
       await coach("p0_calibration_intro", { phase: "calibration" });
 
       let nextHoldIndex = 1;
-      let validCalibrationCount = 0;
+      let measuredCalibrationCount = 0;
+      let calibrationReady = false;
       let previousMeta: Record<string, unknown> | null = null;
       let previousReleaseAt: number | null = null;
       const maximumCalibrationAttempts = 6;
 
       while (
         guidedRunningRef.current &&
-        validCalibrationCount < 3 &&
+        !calibrationReady &&
         nextHoldIndex <= maximumCalibrationAttempts
       ) {
+        const provisional = provisionalCalibrationGate();
+        const calibrationNumber = Math.min(provisional.candidateCount + 1, 3);
         const meta: Record<string, unknown> = {
           holdIndex: nextHoldIndex,
           role: "learn",
-          calibrationNumber: validCalibrationCount + 1,
+          calibrationNumber,
           attemptNumber: nextHoldIndex,
         };
         const anchorPitch = await waitForRestAnchor(
@@ -705,6 +828,17 @@ export default function LabPage() {
           previousReleaseAt == null,
         );
         if (!guidedRunningRef.current || anchorPitch == null) return;
+        setLiveGate({
+          mode: "calibration",
+          anchorPitch,
+          direction: provisional.direction,
+          targetExcursionDeg: provisional.target,
+          toleranceDeg: provisional.tolerance,
+          label:
+            provisional.target == null
+              ? "First calibration sets your reference"
+              : "Match the green calibration range",
+        });
         if (previousMeta) {
           mark("recovery_minimum_complete", {
             ...previousMeta,
@@ -719,39 +853,77 @@ export default function LabPage() {
 
         enterGuidedPhase(
           "inhale",
-          `INHALE • Calibration ${validCalibrationCount + 1} of 3`,
+          `INHALE • Calibration ${calibrationNumber} of 3`,
           meta,
         );
         mark("inhale_start", meta);
         const inhaleAt = performance.now();
         await coach("p0_inhale", meta);
-        await waitUntil(inhaleAt + 4000, `INHALE • Calibration ${validCalibrationCount + 1} of 3`);
+        let calibrationAcquired = true;
+        if (provisional.target != null && provisional.tolerance != null) {
+          calibrationAcquired = await acquirePracticeTarget(
+            meta,
+            anchorPitch,
+            {
+              direction: provisional.direction,
+              excursionDeg: provisional.target,
+              toleranceDeg: provisional.tolerance,
+            },
+            inhaleAt + 5000,
+          );
+        } else {
+          await waitUntil(inhaleAt + 4000, `INHALE • Calibration ${calibrationNumber} of 3`);
+        }
+        if (!calibrationAcquired) {
+          mark("calibration_acquisition_aborted", meta);
+          mark("release", { ...meta, reason: "target_not_acquired" });
+          previousReleaseAt = performance.now();
+          enterGuidedPhase("release", "RELEASE • Reset and try again", meta);
+          await coach("p0_abort", meta);
+          setLiveGate(null);
+          previousMeta = meta;
+          nextHoldIndex += 1;
+          continue;
+        }
         enterGuidedPhase(
           "hold",
-          `HOLD • Calibration ${validCalibrationCount + 1} of 3`,
+          `HOLD • Calibration ${calibrationNumber} of 3`,
           meta,
         );
-        await coach("p0_hold", meta);
+        const calibrationHoldAt = performance.now();
         mark("hold_start", meta);
-        await waitGuidedSeconds(
-          config.holdSeconds,
-          `HOLD • Calibration ${validCalibrationCount + 1} of 3`,
+        await coach(holdCueForSeconds(config.holdSeconds), meta);
+        await waitUntil(
+          calibrationHoldAt + config.holdSeconds * 1000,
+          `HOLD • Calibration ${calibrationNumber} of 3`,
         );
         mark("release", meta);
         previousReleaseAt = performance.now();
         enterGuidedPhase("release", "RELEASE • Breathe normally", meta);
         await coach("p0_release", meta);
+        setLiveGate(null);
         previousMeta = meta;
 
-        const completedHold = currentAnalysis().holds.find(
+        const updatedAnalysis = currentAnalysis();
+        const completedHold = updatedAnalysis.holds.find(
           (hold: { index: number }) => hold.index === nextHoldIndex,
         );
+        measuredCalibrationCount = updatedAnalysis.summary.learnedTarget.learnHoldCount;
+        calibrationReady = Boolean(updatedAnalysis.summary.learnedTarget.available);
         if (completedHold?.valid) {
-          validCalibrationCount += 1;
-          mark("calibration_hold_accepted", {
+          mark("calibration_hold_measured", {
             ...meta,
-            validCalibrationCount,
+            measuredCalibrationCount,
+            calibrationReady,
           });
+          if (!calibrationReady && measuredCalibrationCount >= 3) {
+            await coach("p0_calibration_mismatch", {
+              ...meta,
+              measuredCalibrationCount,
+              calibrationExcursionSdDeg:
+                updatedAnalysis.summary.learnedTarget.observedLearnExcursionSdDeg,
+            });
+          }
         } else {
           mark("calibration_hold_rejected", {
             ...meta,
@@ -771,7 +943,6 @@ export default function LabPage() {
       const excursion = learned.targetSignedExcursionDeg;
       const tolerance = learned.experimentalTrainingToleranceDeg;
       if (
-        validCalibrationCount < 3 ||
         !learned.available ||
         typeof direction !== "number" ||
         !Number.isFinite(direction) ||
@@ -783,8 +954,10 @@ export default function LabPage() {
         mark("target_learning_failed", {
           afterHoldIndex: nextHoldIndex - 1,
           validLearnHoldCount: learned.learnHoldCount,
-          reason: "three_valid_calibration_holds_required",
+          reason: "three_matching_calibration_holds_required",
         });
+        enterGuidedStage("complete");
+        setLiveGate(null);
         enterGuidedPhase("complete", "CALIBRATION NEEDS A RETRY");
         await coach("p0_calibration_failed", {
           phase: "calibration",
@@ -805,15 +978,27 @@ export default function LabPage() {
         targetExcursionDeg: excursion,
         toleranceDeg: tolerance,
         method: "median_relative_excursion",
+        selectedHoldIndexes: learned.selectedHoldIndexes,
       });
+      enterGuidedStage("practice");
       enterGuidedPhase("practice", "PRACTICE • Two coached holds");
       await coach("p0_practice_intro", { phase: "practice" });
 
-      for (let practiceNumber = 1; practiceNumber <= 2 && guidedRunningRef.current; practiceNumber++) {
+      let completedPracticeCount = 0;
+      let practiceAttemptCount = 0;
+      const maximumPracticeAttempts = 4;
+      while (
+        completedPracticeCount < 2 &&
+        practiceAttemptCount < maximumPracticeAttempts &&
+        guidedRunningRef.current
+      ) {
+        practiceAttemptCount += 1;
+        const practiceNumber = completedPracticeCount + 1;
         const meta: Record<string, unknown> = {
           holdIndex: nextHoldIndex,
           role: "practice",
           practiceNumber,
+          practiceAttemptNumber: practiceAttemptCount,
         };
         const anchorPitch = await waitForRestAnchor(
           meta,
@@ -833,27 +1018,66 @@ export default function LabPage() {
             source: "fixed_recovery",
           });
         }
+        setLiveGate({
+          mode: "practice",
+          anchorPitch,
+          direction: learnedTargetRef.current.direction,
+          targetExcursionDeg: learnedTargetRef.current.excursionDeg,
+          toleranceDeg: learnedTargetRef.current.toleranceDeg,
+          label: `Practice ${practiceNumber} of 2 • place the blue bar in green`,
+        });
         enterGuidedPhase("inhale", `INHALE • Practice ${practiceNumber} of 2`, meta);
         mark("inhale_start", meta);
+        const practiceInhaleAt = performance.now();
         await coach("p0_inhale", meta);
-        await acquirePracticeTarget(meta, anchorPitch, learnedTargetRef.current);
+        const acquired = await acquirePracticeTarget(
+          meta,
+          anchorPitch,
+          learnedTargetRef.current,
+          practiceInhaleAt + 5000,
+        );
+        if (!acquired) {
+          mark("practice_attempt_aborted", { ...meta, reason: "target_not_acquired" });
+          mark("release", { ...meta, reason: "target_not_acquired" });
+          previousReleaseAt = performance.now();
+          enterGuidedPhase("release", "RELEASE • Target not acquired", meta);
+          await coach("p0_abort", meta);
+          setLiveGate(null);
+          previousMeta = meta;
+          nextHoldIndex += 1;
+          continue;
+        }
         enterGuidedPhase("hold", `HOLD • Practice ${practiceNumber} of 2`, meta);
-        await coach("p0_hold", meta);
+        const practiceHoldAt = performance.now();
         mark("hold_start", {
           ...meta,
           targetExcursionDeg: excursion,
           toleranceDeg: tolerance,
         });
-        await runPracticeHold(
+        await coach(holdCueForSeconds(config.holdSeconds), meta);
+        const holdCompleted = await runPracticeHold(
           config.holdSeconds,
           meta,
           anchorPitch,
           learnedTargetRef.current,
+          practiceHoldAt,
         );
         mark("release", meta);
         previousReleaseAt = performance.now();
-        enterGuidedPhase("release", "RELEASE • Breathe normally", meta);
-        await coach("p0_release", meta);
+        if (holdCompleted) {
+          completedPracticeCount += 1;
+          mark("practice_hold_completed", {
+            ...meta,
+            completedPracticeCount,
+            requestedHoldSeconds: config.holdSeconds,
+          });
+          enterGuidedPhase("release", "RELEASE • Breathe normally", meta);
+          await coach("p0_release", meta);
+        } else {
+          enterGuidedPhase("release", "RELEASE • Outside target range", meta);
+          await coach("p0_abort", meta);
+        }
+        setLiveGate(null);
         previousMeta = meta;
         nextHoldIndex += 1;
       }
@@ -862,15 +1086,35 @@ export default function LabPage() {
         enterGuidedPhase("rest", "REST • Final recovery", previousMeta);
         await waitUntil(previousReleaseAt + Math.min(8, config.recoverySeconds) * 1000, "REST • Final recovery");
         mark("recovery_end", previousMeta);
-        enterGuidedPhase("complete", "COMPLETE");
-        mark("session_end", { outcome: "practice_complete" });
-        await coach("p0_session_complete", { phase: "complete" });
+        enterGuidedStage("complete");
+        setLiveGate(null);
+        if (completedPracticeCount === 2) {
+          enterGuidedPhase("complete", "COMPLETE • Two practice holds collected");
+          mark("session_end", { outcome: "practice_complete" });
+          await coach("p0_session_complete", { phase: "complete" });
+        } else {
+          enterGuidedPhase(
+            "complete",
+            `COMPLETE • ${completedPracticeCount} of 2 practice holds collected`,
+          );
+          mark("session_end", {
+            outcome: "practice_incomplete",
+            completedPracticeCount,
+            practiceAttemptCount,
+          });
+          await coach("p0_practice_incomplete", {
+            phase: "complete",
+            completedPracticeCount,
+          });
+        }
       }
     } finally {
       setGuidedActive(false);
+      setGuidedStage("idle");
       setGuidedPhase("IDLE");
       setGuidedLabel("");
       setStepCountdown(0);
+      setLiveGate(null);
       guidedRunningRef.current = false;
       if (recordingRef.current) {
         await sleep(400);
@@ -883,8 +1127,10 @@ export default function LabPage() {
     guidedRunningRef.current = false;
     stopAudio();
     setGuidedActive(false);
+    setGuidedStage("idle");
     setGuidedPhase("IDLE");
     setGuidedLabel("");
+    setLiveGate(null);
     if (recordingRef.current) stopRec();
   };
 
@@ -963,6 +1209,7 @@ export default function LabPage() {
                   rehearsal → 3 calibration → 2 practice
                 </div>
               </div>
+              <GuidedJourney stage={guidedStage} />
               <div className="grid grid-cols-2 gap-2">
                 <select
                   value={guidedHoldSec}
@@ -999,6 +1246,9 @@ export default function LabPage() {
                 </button>
               ) : (
                 <>
+                  {liveGate && (
+                    <LiveTargetGate pitch={pitch} gate={liveGate} phase={guidedPhase} />
+                  )}
                   <div className="text-center py-2">
                     <div className="text-2xl font-semibold tracking-widest" style={{ color: guidedPhaseColor(guidedPhase) }}>
                       {guidedPhase}
@@ -1225,6 +1475,119 @@ export default function LabPage() {
   );
 }
 
+function GuidedJourney({ stage }: { stage: GuidedStage }) {
+  const currentIndex = GUIDED_JOURNEY.findIndex((item) => item.id === stage);
+  const current = currentIndex >= 0 ? GUIDED_JOURNEY[currentIndex] : null;
+  return (
+    <div className="rounded-md p-2.5" style={{ background: "#0a0c10", border: "1px solid #303441" }}>
+      <div className="grid grid-cols-3 sm:grid-cols-6 gap-1.5">
+        {GUIDED_JOURNEY.map((item, index) => {
+          const isCurrent = index === currentIndex;
+          const isComplete = currentIndex >= 0 && index < currentIndex;
+          return (
+            <div
+              key={item.id}
+              className="rounded p-2 min-h-16"
+              style={{
+                background: isCurrent ? "#0c2d48" : isComplete ? "#0d2b1a" : "#151820",
+                border: `1px solid ${isCurrent ? "#38bdf8" : isComplete ? "#22c55e" : "#303441"}`,
+                opacity: currentIndex < 0 || isCurrent || isComplete ? 1 : 0.58,
+              }}
+            >
+              <div className="text-[10px] font-semibold uppercase tracking-wide">{item.title}</div>
+              <div className="mt-1 text-[9px] leading-tight opacity-70">{item.detail}</div>
+            </div>
+          );
+        })}
+      </div>
+      <div className="mt-2 text-[10px] leading-relaxed" style={{ color: current ? "#bae6fd" : "#a8a29e" }}>
+        {current
+          ? `Collecting now: ${current.data}.`
+          : "Journey: setup → rehearsal → baseline → three matching calibrations → two successful practices → review."}
+      </div>
+    </div>
+  );
+}
+
+function LiveTargetGate({
+  pitch,
+  gate,
+  phase,
+}: {
+  pitch: number;
+  gate: LiveGate;
+  phase: string;
+}) {
+  const excursion = gate.direction * (pitch - gate.anchorPitch);
+  const target = gate.targetExcursionDeg;
+  const tolerance = gate.toleranceDeg;
+  const hasBand = target != null && tolerance != null;
+  const maximum = Math.max(4, (target ?? Math.max(2, excursion)) + (tolerance ?? 1) * 4);
+  const markerBottom = Math.max(0, Math.min(100, (excursion / maximum) * 100));
+  const bandLow = hasBand ? Math.max(0, target - tolerance) : 0;
+  const bandHigh = hasBand ? target + tolerance : 0;
+  const bandBottom = (bandLow / maximum) * 100;
+  const bandHeight = ((bandHigh - bandLow) / maximum) * 100;
+  const error = hasBand ? excursion - target : null;
+  const inRange = error != null && Math.abs(error) <= (tolerance ?? 0);
+  const status = !hasBand
+    ? "First hold establishes the green range"
+    : inRange
+      ? phase === "HOLD"
+        ? "IN RANGE • keep the blue bar here"
+        : "IN RANGE • ready to hold"
+      : error! < 0
+        ? "BELOW RANGE • inhale a little more"
+        : "ABOVE RANGE • ease back slightly";
+  return (
+    <div
+      className="rounded-lg p-3 grid grid-cols-[76px_1fr] gap-4 items-center"
+      style={{ background: "#071018", border: `1px solid ${inRange ? "#22c55e" : "#303441"}` }}
+    >
+      <div className="relative h-48 rounded-md overflow-hidden" style={{ background: "#111827", border: "1px solid #334155" }}>
+        {[25, 50, 75].map((value) => (
+          <div
+            key={value}
+            className="absolute left-0 right-0 border-t"
+            style={{ bottom: `${value}%`, borderColor: "#253044" }}
+          />
+        ))}
+        {hasBand && (
+          <div
+            className="absolute left-1 right-1 rounded"
+            style={{
+              bottom: `${bandBottom}%`,
+              height: `${Math.max(4, bandHeight)}%`,
+              background: "rgba(34,197,94,0.42)",
+              border: "1px solid #4ade80",
+            }}
+          />
+        )}
+        <div
+          className="absolute left-0 right-0 h-1 rounded transition-[bottom] duration-100"
+          style={{ bottom: `calc(${markerBottom}% - 2px)`, background: "#38bdf8", boxShadow: "0 0 8px #38bdf8" }}
+        />
+        <div className="absolute left-1 top-1 text-[8px] opacity-50">INHALE ↑</div>
+        <div className="absolute left-1 bottom-1 text-[8px] opacity-50">REST 0</div>
+      </div>
+      <div>
+        <div className="text-[10px] uppercase tracking-wider opacity-60">Live target gate</div>
+        <div className="mt-1 text-sm font-semibold" style={{ color: inRange ? "#4ade80" : "#e7e5e4" }}>
+          {status}
+        </div>
+        <div className="mt-3 grid grid-cols-2 gap-2 text-[10px]">
+          <MiniStat label="blue bar" value={`${excursion.toFixed(2)}°`} />
+          <MiniStat
+            label="green range"
+            value={hasBand ? `${bandLow.toFixed(2)}–${bandHigh.toFixed(2)}°` : "learning"}
+          />
+        </div>
+        <div className="mt-2 text-[10px] leading-relaxed opacity-65">{gate.label}</div>
+      </div>
+    </div>
+  );
+}
+
 function Stat({ label, value }: { label: string; value: string }) {
   return (
     <div
@@ -1253,6 +1616,22 @@ function guidedPhaseColor(phase: string) {
   if (phase === "READY") return "#f59e0b";
   if (phase === "COMPLETE") return "#22c55e";
   return "#e7e5e4";
+}
+
+function holdCueForSeconds(seconds: number) {
+  if (seconds === 8) return "p0_hold_8" as const;
+  if (seconds === 10) return "p0_hold_10" as const;
+  if (seconds === 12) return "p0_hold_12" as const;
+  if (seconds === 15) return "p0_hold_15" as const;
+  if (seconds === 20) return "p0_hold_20" as const;
+  return "p0_hold" as const;
+}
+
+function medianClient(values: number[]) {
+  if (!values.length) return null;
+  const sorted = [...values].sort((a, b) => a - b);
+  const middle = Math.floor(sorted.length / 2);
+  return sorted.length % 2 ? sorted[middle] : (sorted[middle - 1] + sorted[middle]) / 2;
 }
 
 function sleep(ms: number) {

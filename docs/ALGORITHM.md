@@ -183,6 +183,20 @@ A patient whose three Learn holds differ by < 0.5° gets the floor
 tolerance (tight); a patient whose holds vary widely (> 1° SD across the
 three) gets a more forgiving band so Practice is not impossible.
 
+### Lab P0 consistency gate
+
+The Lab P0 harness does not widen the band to accommodate inconsistent
+calibration. It selects the tightest same-direction trio from up to six valid
+attempts and requires excursion SD ≤ 0.75°. If no trio qualifies, Practice does
+not start. After the first measurable calibration, the live screen shows a blue
+position bar and a provisional green range to guide subsequent attempts.
+
+Practice uses an acquire-then-hold state machine. The blue bar must remain in
+the green band for 750 ms within a five-second acquisition window. Acquisition
+failure releases immediately. During the timed hold, sustained out-of-band
+motion receives one directional cue; failure to return aborts and restarts the
+attempt. The runner collects two successful holds within four attempts.
+
 ---
 
 ## 9. Audio pipeline
@@ -194,7 +208,8 @@ a different voice (Vranich, etc.) is a file-swap.
 
 Playback is serialized through a single active `<audio>` element. Lab P0
 awaits each clip's `ended` event before advancing, while an explicit cancel or
-higher-priority cue can stop the active clip. On iOS, audio is unlocked by a
+higher-priority cue can stop the active clip. A duration-aware timeout prevents
+a missing browser `ended` event from freezing the protocol. On iOS, audio is unlocked by a
 `requestPermission`-coupled gesture on the Welcome screen — without that,
 non-interactive playback is blocked.
 

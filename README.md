@@ -180,14 +180,22 @@ threshold tuning.
 
 The current `dibh-lab/v3` guided harness is hands-free after Start. One short
 rehearsal teaches REST, READY, INHALE, HOLD, and RELEASE before measurement.
-The harness then collects three valid calibration holds (repeating unclear
-attempts, up to six total) and runs two coached practice holds. Every attempt
-uses the final two seconds of its fixed recovery window as a quiet relative
-anchor. The first three valid excursions set a fixed session target by robust
-median; practice attempts receive audio cues to reach and maintain it.
+The harness then searches up to six calibration attempts for three matching
+holds and runs up to four attempts to collect two successful coached practice
+holds. Every attempt captures a quiet relative anchor immediately before the
+READY prompt. The tightest consistent calibration trio sets a fixed session
+target by robust median. During calibration and practice, an RPM-style live
+blue position bar is shown against the green target range.
+
+Practice must acquire the range within five seconds. A sustained drift gets
+one correction; if the user cannot return, the attempt aborts to RELEASE and
+restarts after recovery instead of asking for repeated inhale/exhale changes
+inside one breath hold. The HOLD prompt states the selected duration and the
+visible countdown begins when HOLD is called.
 
 Lab P0 uses a dedicated prerecorded prompt set and awaits each MP3 before the
-next instruction. JSON exports record phase transitions plus prompt start/end
+next instruction, with a bounded timeout so audio cannot freeze the runner.
+JSON exports record phase transitions plus prompt start/end
 events, allowing the trace view to align spoken instructions with measured
 inhale, hold, release, and recovery motion.
 

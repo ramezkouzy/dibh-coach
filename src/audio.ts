@@ -14,15 +14,25 @@ export const PHRASES = {
   p0_practice_intro: "Calibration complete. Now match that breath depth for two practice holds.",
   p0_rest: "Rest. Breathe normally.",
   p0_ready: "Get ready. Your next deep breath starts in five seconds.",
-  p0_inhale: "Inhale now. Take one comfortable deep breath.",
+  p0_inhale: "Inhale now.",
   p0_hold: "Hold now.",
+  p0_hold_8: "Hold for eight seconds. Watch the countdown.",
+  p0_hold_10: "Hold for ten seconds. Watch the countdown.",
+  p0_hold_12: "Hold for twelve seconds. Watch the countdown.",
+  p0_hold_15: "Hold for fifteen seconds. Watch the countdown.",
+  p0_hold_20: "Hold for twenty seconds. Watch the countdown.",
   p0_release: "Release. Breathe normally.",
+  p0_abort: "Outside the target range. Release and breathe normally. We will try again.",
   p0_deeper: "Breathe in a little more.",
   p0_ease_back: "Ease back slightly.",
   p0_target: "Right there.",
   p0_calibration_retry: "That breath was not clear enough to measure. We will repeat it.",
+  p0_calibration_mismatch:
+    "That hold did not match the others closely enough. We will collect another.",
   p0_calibration_failed:
     "Calibration needs another run. Keep the phone still and follow inhale, hold, and release.",
+  p0_practice_incomplete:
+    "Practice stopped after repeated attempts. Review the trace before trying again.",
   p0_session_complete: "Practice complete. Great work.",
 
   // calibrate
@@ -75,7 +85,7 @@ export const PHRASES = {
 } as const;
 
 export type PhraseKey = keyof typeof PHRASES;
-export type AudioPlaybackResult = "ended" | "interrupted" | "failed";
+export type AudioPlaybackResult = "ended" | "interrupted" | "failed" | "timed_out";
 
 let cache: Partial<Record<PhraseKey, HTMLAudioElement>> = {};
 let unlocked = false;
@@ -129,9 +139,22 @@ export function playClip(key: PhraseKey): Promise<AudioPlaybackResult> {
   audio.currentTime = 0;
   return new Promise((resolve) => {
     let settled = false;
+    const timeoutMs = Number.isFinite(audio.duration)
+      ? Math.max(5000, audio.duration * 1000 + 2500)
+      : 15000;
+    const timeoutId = window.setTimeout(() => {
+      try {
+        audio.pause();
+        audio.currentTime = 0;
+      } catch {
+        // best-effort
+      }
+      finish("timed_out");
+    }, timeoutMs);
     const finish = (result: AudioPlaybackResult) => {
       if (settled) return;
       settled = true;
+      window.clearTimeout(timeoutId);
       audio.removeEventListener("ended", onEnded);
       audio.removeEventListener("error", onError);
       if (activePlayback?.audio === audio) activePlayback = null;

@@ -109,23 +109,25 @@ per-phase reports work uniformly across both.
 
 `dibh-lab/v3` preserves the v2 raw channels, adds `betaEma`, and embeds a
 versioned deterministic analysis. A guided run is hands-free after Start and
-contains one unscored rehearsal, three valid Learn-style calibration holds,
-and two audio-guided Practice-style checks against the fixed learned target.
-An unclear calibration hold is recorded but rejected and repeated, up to six
-calibration attempts.
+contains one unscored rehearsal, the tightest consistent trio found within up
+to six Learn-style calibration attempts, and two successful audio-guided
+Practice-style checks against the fixed learned target. Practice may use up to
+four attempts; acquisition or sustained-drift failures abort to RELEASE and
+retry rather than becoming scored holds.
 
 ```json
 {
   "schema": "dibh-lab/v3",
   "sessionId": "33d87e61-79ee-45c7-9543-7c8d5e4e7405",
-  "appBuild": "lab-p0.3",
+  "appBuild": "lab-p0.4",
   "algorithm": {
     "id": "dibh-lab-p0",
-    "version": "0.2.0",
+    "version": "0.3.0",
     "params": {
       "emaAlpha": 0.3,
       "stabilityWindowMs": 2000,
-      "stableSlopeCeilingDegPerSec": 0.25
+      "stableSlopeCeilingDegPerSec": 0.25,
+      "calibrationExcursionSdCeilingDeg": 0.75
     }
   },
   "protocol": {
@@ -136,6 +138,8 @@ calibration attempts.
     "learnHoldCount": 3,
     "calibrationAttemptLimit": 6,
     "practiceHoldCount": 2,
+    "practiceAttemptLimit": 4,
+    "targetAcquisitionSeconds": 5,
     "recoverySeconds": 20,
     "handsFree": true,
     "targetMethod": "median_relative_excursion"
@@ -187,9 +191,11 @@ condition must persist for 1.5 seconds before a confirmed drift. Stable
 segments retain their exact boundaries, and plateau statistics are calculated
 from the segment interior rather than from the end of the entire attempt.
 
-Each hold records its own quiet prehold anchor. The learned target is the robust
-median of the first three valid, direction-normalized excursions from those
-anchors. Absolute pitch is diagnostic only; every practice target is translated
+Each hold records its quiet prehold anchor immediately before the READY prompt,
+before anticipatory inhale motion can contaminate it. The learned target is the
+robust median of the tightest three valid, direction-normalized excursions,
+provided their SD does not exceed 0.75 degrees. Absolute pitch is diagnostic
+only; every practice target is translated
 from the current attempt's relaxed anchor. The target remains fixed for the
 session and is not weakened by later performance. Session reproducibility is
 decomposed into:
@@ -204,17 +210,22 @@ anchor before the hold began. A hold is flagged when it does not show at least
 1.5 degrees of new movement in its learned direction; this makes a phone that
 was already near the target distinguishable from a new inhalation.
 
-The final two Practice holds also report absolute and excursion target
+The two successful Practice holds also report absolute and excursion target
 error, target-acquisition time, whether their plateau falls inside the
 experimental band, their longest continuous stable-and-on-target run, whether
 that run reached the selected duration, and the audio guidance issued. If three
-valid calibration holds do not produce a target, practice stops rather than
-silently using an invalid target.
+matching calibration holds do not produce a target, practice stops rather than
+silently using an invalid target. Practice must acquire the target band within
+five seconds. Sustained drift receives one correction, then aborts to RELEASE
+if the signal remains outside the band.
 
-Recovery is also hands-free and ends at the configured duration. The final two
-seconds provide the next attempt's relaxed anchor; low-confidence anchors are
-flagged without silently extending the rest. `guided_phase`, `coach_cue`,
-`coach_cue_end`, `calibration_hold_accepted`, `calibration_hold_rejected`,
+Recovery is also hands-free and ends at the configured duration. The two-second
+window immediately before READY provides the next attempt's relaxed anchor;
+low-confidence anchors are flagged without silently extending the rest.
+`guided_stage`, `guided_phase`, `coach_cue`, `coach_cue_end`,
+`calibration_hold_measured`, `calibration_hold_rejected`,
+`calibration_acquisition_aborted`, `practice_attempt_aborted`,
+`practice_hold_aborted`, `practice_hold_completed`,
 `recovery_minimum_complete`, `rest_anchor_acquired`, `recovery_end`,
 `target_learned`, `target_acquired`, `target_enter`, and `target_exit` events
 make the complete instruction and measurement flow replayable.

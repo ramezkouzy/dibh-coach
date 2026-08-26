@@ -1,6 +1,6 @@
 export const LAB_P0_ALGORITHM = Object.freeze({
   id: "dibh-lab-p0",
-  version: "0.2.0",
+  version: "0.3.0",
   params: Object.freeze({
     emaAlpha: 0.3,
     stabilityWindowMs: 2000,
@@ -14,6 +14,7 @@ export const LAB_P0_ALGORITHM = Object.freeze({
     trainingToleranceFloorDeg: 0.5,
     trainingToleranceCeilingDeg: 2,
     trainingToleranceNoiseMultiplier: 2,
+    calibrationExcursionSdCeilingDeg: 0.75,
     minimumTargetExcursionDeg: 1.5,
     restingWindowMs: 2000,
     restingSdCeilingDeg: 0.35,
@@ -47,6 +48,23 @@ function standardDeviation(values) {
   const center = mean(values);
   if (center == null) return null;
   return Math.sqrt(values.reduce((sum, value) => sum + (value - center) ** 2, 0) / values.length);
+}
+
+function tightestCalibrationTrio(holds, direction) {
+  const candidates = holds.filter(
+    (hold) => hold.direction === direction && Number.isFinite(hold.relativeExcursionDeg),
+  );
+  let best = null;
+  for (let first = 0; first < candidates.length - 2; first++) {
+    for (let second = first + 1; second < candidates.length - 1; second++) {
+      for (let third = second + 1; third < candidates.length; third++) {
+        const trio = [candidates[first], candidates[second], candidates[third]];
+        const sd = standardDeviation(trio.map((hold) => hold.relativeExcursionDeg));
+        if (sd != null && (!best || sd < best.sd)) best = { holds: trio, sd };
+      }
+    }
+  }
+  return best;
 }
 
 function medianAbsoluteDeviation(values) {
@@ -359,6 +377,15 @@ function analyzeHold(points, events, holdStartEvent, fallbackIndex, totalHolds, 
     issues.push("excursion_too_small");
   }
   if (!freshInhaleEvidence) issues.push("insufficient_fresh_inhale");
+  if (
+    events.some(
+      (event) =>
+        event.type === "practice_hold_aborted" &&
+        Number(event?.meta?.holdIndex) === holdIndex,
+    )
+  ) {
+    issues.push("practice_hold_aborted");
+  }
 
   return {
     index: holdIndex,
@@ -449,7 +476,10 @@ function sessionSummary(holds, points, requestedHoldSeconds, events) {
   const validHolds = holds.filter(
     (hold) => hold.valid && hold.bestStableSegment && hold.prehold,
   );
-  const directions = validHolds.map((hold) => hold.direction).filter((value) => value != null);
+  const validLearnCandidates = validHolds.filter((hold) => hold.role === "learn");
+  const directions = validLearnCandidates
+    .map((hold) => hold.direction)
+    .filter((value) => value != null);
   const directionSum = directions.reduce((sum, value) => sum + value, 0);
   const learnedDirection = directionSum === 0 ? null : Math.sign(directionSum);
   const directionConsistencyPct = directions.length
@@ -465,7 +495,15 @@ function sessionSummary(holds, points, requestedHoldSeconds, events) {
           (hold.bestStableSegment.medianPitchDeg - hold.prehold.medianPitchDeg),
     )
     .filter((value) => value != null);
-  const learnHolds = validHolds.filter((hold) => hold.role === "learn").slice(0, 3);
+  const calibrationSelection =
+    learnedDirection == null
+      ? null
+      : tightestCalibrationTrio(validLearnCandidates, learnedDirection);
+  const calibrationAvailable = Boolean(
+    calibrationSelection &&
+      calibrationSelection.sd <= LAB_P0_ALGORITHM.params.calibrationExcursionSdCeilingDeg,
+  );
+  const learnHolds = calibrationAvailable ? calibrationSelection.holds : [];
   const learnPlateaus = learnHolds.map((hold) => hold.bestStableSegment.medianPitchDeg);
   const learnExcursions = learnHolds
     .map((hold) =>
@@ -480,7 +518,7 @@ function sessionSummary(holds, points, requestedHoldSeconds, events) {
     .filter((value) => value != null);
   const typicalNoise = median(withinHoldNoise);
   const trainingTolerance =
-    learnHolds.length >= 3 && typicalNoise != null
+    calibrationAvailable && typicalNoise != null
       ? Math.min(
           LAB_P0_ALGORITHM.params.trainingToleranceCeilingDeg,
           Math.max(
@@ -489,8 +527,8 @@ function sessionSummary(holds, points, requestedHoldSeconds, events) {
           ),
         )
       : null;
-  const targetPitch = learnHolds.length >= 3 ? median(learnPlateaus) : null;
-  const targetExcursion = learnHolds.length >= 3 ? median(learnExcursions) : null;
+  const targetPitch = calibrationAvailable ? median(learnPlateaus) : null;
+  const targetExcursion = calibrationAvailable ? median(learnExcursions) : null;
   const practice = validHolds
     .filter((hold) => hold.role === "practice")
     .map((hold) => {
@@ -512,7 +550,7 @@ function sessionSummary(holds, points, requestedHoldSeconds, events) {
           event.type === "coach_cue" && Number(event?.meta?.holdIndex) === hold.index,
       );
       const correctionEvents = coachingEvents.filter((event) =>
-        ["go_deeper", "ease_back"].includes(event?.meta?.cue),
+        ["go_deeper", "ease_back", "p0_deeper", "p0_ease_back"].includes(event?.meta?.cue),
       );
       const targetAcquired = events.find(
         (event) =>
@@ -588,14 +626,17 @@ function sessionSummary(holds, points, requestedHoldSeconds, events) {
       ),
     ),
     learnedTarget: {
-      available: learnHolds.length >= 3,
-      learnHoldCount: learnHolds.length,
+      available: calibrationAvailable,
+      learnHoldCount: validLearnCandidates.length,
+      selectedHoldIndexes: learnHolds.map((hold) => hold.index),
       method: "median_relative_excursion",
       targetPitchDeg: round(targetPitch),
       targetPitchUse: "diagnostic_only",
       targetSignedExcursionDeg: round(targetExcursion),
       observedLearnPlateauSdDeg: round(standardDeviation(learnPlateaus)),
-      observedLearnExcursionSdDeg: round(standardDeviation(learnExcursions)),
+      observedLearnExcursionSdDeg: round(calibrationSelection?.sd),
+      calibrationExcursionSdCeilingDeg:
+        LAB_P0_ALGORITHM.params.calibrationExcursionSdCeilingDeg,
       experimentalTrainingToleranceDeg: round(trainingTolerance),
     },
     practice,

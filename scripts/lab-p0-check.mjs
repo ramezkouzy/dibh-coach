@@ -123,4 +123,32 @@ for (const direction of [-1, 1]) {
   }
 }
 
-console.log("Lab P0 synthetic replay checks passed for both pitch directions.");
+const inconsistent = synthRecording(1, 3);
+for (const row of inconsistent.samples) {
+  const t = row[0];
+  let added = 0;
+  if (t >= 14_000 && t < 18_000) added = 4 * ((t - 14_000) / 4_000);
+  if (t >= 18_000 && t < 28_000) added = 4;
+  if (t >= 28_000 && t < 32_000) added = 4 * (1 - (t - 28_000) / 4_000);
+  row[2] += added;
+  row[3] += added;
+}
+const inconsistentAnalysis = analyzeLabRecording(inconsistent);
+assert.equal(
+  inconsistentAnalysis.summary.learnedTarget.available,
+  false,
+  "three individually valid but mismatched calibration holds must not produce a target",
+);
+assert.ok(inconsistentAnalysis.summary.learnedTarget.observedLearnExcursionSdDeg > 0.75);
+
+const aborted = synthRecording(1);
+aborted.events.push({
+  t: aborted.events.find((event) => event.type === "hold_start" && event.meta?.holdIndex === 4).t + 4000,
+  type: "practice_hold_aborted",
+  meta: { holdIndex: 4, role: "practice", reason: "sustained_above_target" },
+});
+const abortedAnalysis = analyzeLabRecording(aborted);
+assert.equal(abortedAnalysis.holds.find((hold) => hold.index === 4).valid, false);
+assert.ok(abortedAnalysis.issues.includes("hold_4:practice_hold_aborted"));
+
+console.log("Lab P0 synthetic replay checks passed for both pitch directions, calibration consistency, and abort handling.");

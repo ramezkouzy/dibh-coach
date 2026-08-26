@@ -71,7 +71,11 @@ export type TraceRecording = {
       signedExcursionSdDeg?: number | null;
       learnedTarget?: {
         available?: boolean;
+        learnHoldCount?: number;
+        selectedHoldIndexes?: number[];
         targetSignedExcursionDeg?: number | null;
+        observedLearnExcursionSdDeg?: number | null;
+        calibrationExcursionSdCeilingDeg?: number | null;
         experimentalTrainingToleranceDeg?: number | null;
       };
       practice?: TracePractice[];
@@ -120,6 +124,21 @@ export default function LabTrace({ recording }: { recording: TraceRecording }) {
           value={`${recording.analysis.quality?.effectiveSampleRateHz ?? "—"} Hz`}
         />
       </div>
+
+      {target && !target.available && (target.learnHoldCount ?? 0) >= 3 && (
+        <div
+          className="rounded-md p-3 text-xs leading-relaxed"
+          style={{ background: "#3a2208", border: "1px solid #92400e", color: "#fde68a" }}
+        >
+          <div className="font-semibold">Calibration range not established</div>
+          <div className="mt-1 opacity-90">
+            The best calibration trio varied by {formatDeg(target.observedLearnExcursionSdDeg)};
+            this Lab version requires ≤ {formatDeg(target.calibrationExcursionSdCeilingDeg)}.
+            Practice attempts from this recording are shown for diagnosis but are not scored
+            against a valid target.
+          </div>
+        </div>
+      )}
 
       <div>
         <div className="mb-2 flex flex-wrap gap-x-4 gap-y-1 text-[10px] uppercase tracking-wider opacity-70">
@@ -691,12 +710,20 @@ function promptLabel(event: TraceEvent) {
     p0_ready: "READY",
     p0_inhale: "INHALE",
     p0_hold: "HOLD",
+    p0_hold_8: "HOLD 8s",
+    p0_hold_10: "HOLD 10s",
+    p0_hold_12: "HOLD 12s",
+    p0_hold_15: "HOLD 15s",
+    p0_hold_20: "HOLD 20s",
     p0_release: "RELEASE",
+    p0_abort: "ABORT / RELEASE",
     p0_deeper: "DEEPER",
     p0_ease_back: "EASE BACK",
     p0_target: "RIGHT THERE",
     p0_calibration_retry: "REPEAT",
+    p0_calibration_mismatch: "COLLECT ANOTHER",
     p0_calibration_failed: "RETRY SESSION",
+    p0_practice_incomplete: "PRACTICE STOPPED",
     p0_session_complete: "COMPLETE",
   };
   return labels[cue] ?? cue.replaceAll("_", " ").toUpperCase();
