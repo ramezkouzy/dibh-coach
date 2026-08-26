@@ -125,7 +125,11 @@ function eventIndex(event, fallback) {
 }
 
 function eventRole(event, holdIndex, totalHolds) {
-  if (event?.meta?.role === "learn" || event?.meta?.role === "practice") {
+  if (
+    event?.meta?.role === "learn" ||
+    event?.meta?.role === "practice" ||
+    event?.meta?.role === "observation"
+  ) {
     return event.meta.role;
   }
   return totalHolds >= 4 && holdIndex > 3 ? "practice" : "learn";
@@ -477,7 +481,10 @@ function sessionSummary(holds, points, requestedHoldSeconds, events) {
     (hold) => hold.valid && hold.bestStableSegment && hold.prehold,
   );
   const validLearnCandidates = validHolds.filter((hold) => hold.role === "learn");
-  const directions = validLearnCandidates
+  const directionCandidates = validLearnCandidates.length
+    ? validLearnCandidates
+    : validHolds.filter((hold) => hold.role === "observation");
+  const directions = directionCandidates
     .map((hold) => hold.direction)
     .filter((value) => value != null);
   const directionSum = directions.reduce((sum, value) => sum + value, 0);

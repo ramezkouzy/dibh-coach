@@ -183,23 +183,24 @@ A patient whose three Learn holds differ by < 0.5° gets the floor
 tolerance (tight); a patient whose holds vary widely (> 1° SD across the
 three) gets a more forgiving band so Practice is not impossible.
 
-### Lab P0 consistency gate
+### Lab P0.7 observation sequence
 
-The Lab P0 harness does not widen the band to accommodate inconsistent
-calibration. It selects the tightest same-direction trio from up to six valid
-attempts and requires excursion SD ≤ 0.75°. If no trio qualifies, Practice does
-not start. After the first measurable calibration, the live screen shows a blue
-position bar and a provisional green range to guide subsequent attempts.
+The live harness no longer makes a calibration or capture decision. It records
+10 seconds of normal breathing, then three identical cycles: a prerecorded deep
+breath-and-hold instruction, a 10-second hold with a cue at five seconds
+remaining, release, and 10 seconds of normal breathing. All cycles complete on
+the clock unless audio fails or the user cancels.
 
-Practice uses an acquire-then-hold state machine. The blue bar must remain in
-the green band for 750 ms within a five-second acquisition window. Acquisition
-failure releases immediately. During the timed hold, sustained out-of-band
-motion receives one directional cue; failure to return aborts and restarts the
-attempt. The runner collects a selectable 2, 5, 8, or 10 successful holds and
-allows twice that number of attempts. With the charging port toward the face,
-negative raw pitch movement is normalized upward for inhale. The practice band
-uses a 1.0-degree minimum half-width, three times measured within-hold noise,
-and a 2.5-degree maximum half-width.
+The full pitch trace begins at the first baseline sample and grows horizontally
+through final recovery. For the instructed charging-port-toward-face placement,
+negative raw pitch change is normalized upward. The vertical display range is
+derived from all values observed so far and expands when the deep breath exceeds
+the normal-breathing amplitude.
+
+Post-run quality analysis still identifies a stable plateau, a fresh excursion
+of at least 1.5 degrees from the preceding two-second window, and baseline
+motion. These labels explain the signal but never hide movement, abort a hold,
+or repeat a cycle.
 
 ---
 
@@ -214,7 +215,7 @@ Playback is serialized through a single active `<audio>` element. Lab P0
 awaits each clip's `ended` event before advancing, while an explicit cancel or
 playback error ends the active prompt. The same user-activated media element is
 reused for every hands-free cue on iPhone. Timed holds announce five seconds
-remaining, and target acquisition plays a dedicated two-note ding.
+remaining.
 A higher-priority cue can stop the active clip. A bounded timeout
 prevents a missing browser `ended` event from freezing the protocol. On iOS,
 audio is unlocked by a `requestPermission`-coupled gesture on the Welcome

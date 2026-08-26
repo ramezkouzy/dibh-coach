@@ -109,17 +109,15 @@ per-phase reports work uniformly across both.
 
 `dibh-lab/v3` preserves the v2 raw channels, adds `betaEma`, and embeds a
 versioned deterministic analysis. A guided run is hands-free after Start and
-contains one unscored rehearsal, the tightest consistent trio found within up
-to six Learn-style calibration attempts, and a selectable 2, 5, 8, or 10
-successful audio-guided Practice-style checks against the fixed learned target.
-Practice may use up to twice the selected goal; acquisition or sustained-drift
-failures abort to RELEASE and retry rather than becoming scored holds.
+records 10 seconds of normal breathing followed by three unconditional
+deep-breath/10-second-hold/10-second-recovery cycles. Capture quality is
+descriptive post-run metadata only; it never rejects or repeats a cycle.
 
 ```json
 {
   "schema": "dibh-lab/v3",
   "sessionId": "33d87e61-79ee-45c7-9543-7c8d5e4e7405",
-  "appBuild": "lab-p0.6",
+  "appBuild": "lab-p0.7",
   "algorithm": {
     "id": "dibh-lab-p0",
     "version": "0.4.0",
@@ -132,18 +130,20 @@ failures abort to RELEASE and retry rather than becoming scored holds.
   },
   "protocol": {
     "mode": "guided",
-    "rehearsal": true,
+    "rehearsal": false,
+    "baselineSeconds": 10,
+    "cycleCount": 3,
     "holdSeconds": 10,
-    "holdCount": 11,
-    "learnHoldCount": 3,
-    "calibrationAttemptLimit": 6,
-    "practiceHoldCount": 8,
-    "practiceAttemptLimit": 16,
-    "targetAcquisitionSeconds": 5,
-    "recoverySeconds": 20,
+    "holdCount": 3,
+    "learnHoldCount": null,
+    "calibrationAttemptLimit": null,
+    "practiceHoldCount": null,
+    "practiceAttemptLimit": null,
+    "targetAcquisitionSeconds": null,
+    "recoverySeconds": 10,
     "handsFree": true,
     "phonePlacement": "charging_port_toward_face",
-    "targetMethod": "median_relative_excursion"
+    "targetMethod": null
   },
   "channels": [
     "t", "alpha", "beta", "betaEma", "gamma",

@@ -14,7 +14,7 @@ export const PHRASES = {
   p0_practice_intro: "Calibration complete. Now repeat that breath depth for the practice holds.",
   p0_rest: "Rest and breathe normally.",
   p0_ready: "Keep breathing normally. In five seconds, take a deep breath in and hold.",
-  p0_inhale: "Take a deep breath in and hold.",
+  p0_inhale: "Take a deep breath in and hold it for ten seconds.",
   p0_hold: "Hold now.",
   p0_hold_8: "Eight-second hold starts now.",
   p0_hold_10: "Ten-second hold starts now.",

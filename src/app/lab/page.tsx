@@ -49,9 +49,11 @@ type LabEvent = { t: number; type: string; meta?: Record<string, unknown> };
 
 type GuidedConfig = {
   holdSeconds: number;
-  practiceHoldCount: number;
+  cycleCount: number;
+  baselineSeconds: number;
   recoverySeconds: number;
   initialDirection: -1 | 1;
+  practiceHoldCount?: number;
 };
 
 type LearnedTarget = {
@@ -60,7 +62,7 @@ type LearnedTarget = {
   toleranceDeg: number;
 };
 
-type GuidedStage = "idle" | "setup" | "rehearsal" | "baseline" | "calibration" | "practice" | "complete";
+type GuidedStage = "idle" | "setup" | "rehearsal" | "baseline" | "calibration" | "practice" | "cycle" | "complete";
 
 type LiveGate = {
   mode: "calibration" | "practice";
@@ -84,6 +86,8 @@ type Recording = {
   protocol: {
     mode: "guided" | "free";
     rehearsal: boolean;
+    baselineSeconds: number | null;
+    cycleCount: number | null;
     holdSeconds: number | null;
     holdCount: number | null;
     learnHoldCount: number | null;
@@ -148,40 +152,22 @@ const GUIDED_JOURNEY: Array<{
   data: string;
 }> = [
   {
-    id: "setup",
-    title: "1. Setup",
-    detail: "Place the phone and hear the plan.",
-    data: "Sensor access and phone placement",
-  },
-  {
-    id: "rehearsal",
-    title: "2. Rehearsal",
-    detail: "Learn REST, INHALE, HOLD, RELEASE.",
-    data: "Unscored instruction timing",
-  },
-  {
     id: "baseline",
-    title: "3. Baseline",
-    detail: "Breathe normally for 12 seconds.",
-    data: "Resting motion and sensor noise",
+    title: "1. Normal breathing",
+    detail: "Record the full breathing trace for 10 seconds.",
+    data: "Normal inspiration and expiration",
   },
   {
-    id: "calibration",
-    title: "4. Calibration",
-    detail: "Collect three matching holds.",
-    data: "Repeatable inhale depth and stability",
-  },
-  {
-    id: "practice",
-    title: "5. Practice",
-    detail: "Repeat blue-in-green holds.",
-    data: "Acquisition, drift, corrections, duration",
+    id: "cycle",
+    title: "2. Three cycles",
+    detail: "Deep breath, 10-second hold, then 10-second recovery.",
+    data: "Three complete breathing and hold cycles",
   },
   {
     id: "complete",
-    title: "6. Review",
-    detail: "Download and inspect both traces.",
-    data: "Calibration and practice comparison",
+    title: "3. Review",
+    detail: "Inspect the uninterrupted trace and download the JSON.",
+    data: "Full trace and descriptive hold quality",
   },
 ];
 
@@ -214,6 +200,8 @@ export default function LabPage() {
   const [stepCountdown, setStepCountdown] = useState<number>(0);
   const [liveGate, setLiveGate] = useState<LiveGate | null>(null);
   const [audioStatus, setAudioStatus] = useState<"ready" | "testing" | "error" | null>(null);
+  const [traceAnchorPitch, setTraceAnchorPitch] = useState<number | null>(null);
+  const [traceSessionStart, setTraceSessionStart] = useState<number | null>(null);
 
   // ---- refs ---------------------------------------------------------------
   const samplesRef = useRef<Sample[]>([]);
@@ -420,8 +408,6 @@ export default function LabPage() {
     activeScenarioRef.current =
       sc ?? (scenario === "custom" && customScenario ? customScenario : scenario);
     guidedConfigRef.current = guidedConfig ?? null;
-    learnedTargetRef.current = null;
-    setLiveGate(null);
     recordingRef.current = true;
     lastSampleAtRef.current = 0;
     setDuration(0);
@@ -472,7 +458,7 @@ export default function LabPage() {
     const recordingBase = {
       schema: "dibh-lab/v3" as const,
       sessionId: sessionIdRef.current,
-      appBuild: "lab-p0.6",
+      appBuild: "lab-p0.7",
       algorithm: LAB_P0_ALGORITHM,
       scenario: activeScenarioRef.current,
       note,
@@ -481,18 +467,20 @@ export default function LabPage() {
       ua: navigator.userAgent,
       protocol: {
         mode: guidedConfig ? ("guided" as const) : ("free" as const),
-        rehearsal: Boolean(guidedConfig),
+        rehearsal: false,
+        baselineSeconds: guidedConfig?.baselineSeconds ?? null,
+        cycleCount: guidedConfig?.cycleCount ?? null,
         holdSeconds: guidedConfig?.holdSeconds ?? null,
-        holdCount: guidedConfig ? 3 + guidedConfig.practiceHoldCount : null,
-        learnHoldCount: guidedConfig ? 3 : null,
-        calibrationAttemptLimit: guidedConfig ? 6 : null,
-        practiceHoldCount: guidedConfig?.practiceHoldCount ?? null,
-        practiceAttemptLimit: guidedConfig ? Math.max(4, guidedConfig.practiceHoldCount * 2) : null,
-        targetAcquisitionSeconds: guidedConfig ? 5 : null,
+        holdCount: guidedConfig?.cycleCount ?? null,
+        learnHoldCount: null,
+        calibrationAttemptLimit: null,
+        practiceHoldCount: null,
+        practiceAttemptLimit: null,
+        targetAcquisitionSeconds: null,
         recoverySeconds: guidedConfig?.recoverySeconds ?? null,
         handsFree: Boolean(guidedConfig),
         phonePlacement: guidedConfig ? "charging_port_toward_face" as const : null,
-        targetMethod: guidedConfig ? ("median_relative_excursion" as const) : null,
+        targetMethod: null,
       },
       samples: samplesRef.current,
       events: eventsRef.current,
@@ -545,20 +533,27 @@ export default function LabPage() {
   ) => {
     const deadline = holdStartedAt + seconds * 1000;
     let fiveSecondsAnnounced = seconds <= 5;
+    let audioAvailable = true;
     setGuidedLabel(label);
     while (guidedRunningRef.current && performance.now() < deadline) {
       const now = performance.now();
       setStepCountdown(Math.max(1, Math.ceil((deadline - now) / 1000)));
       if (!fiveSecondsAnnounced && now >= deadline - 5000) {
         fiveSecondsAnnounced = true;
-        await coach("p0_five_seconds_left", {
+        const result = await coach("p0_five_seconds_left", {
           ...meta,
           reason: "five_seconds_remaining",
         });
+        if (result !== "ended") {
+          audioAvailable = false;
+          guidedRunningRef.current = false;
+          break;
+        }
       }
       await sleep(150);
     }
     setStepCountdown(0);
+    return audioAvailable && guidedRunningRef.current;
   };
 
   const waitForRestAnchor = async (
@@ -796,6 +791,143 @@ export default function LabPage() {
   };
 
   const startGuided = async () => {
+    unlockAudio();
+    if (!granted) {
+      await requestPerm();
+      return;
+    }
+    if (recording) return;
+
+    const config: GuidedConfig = {
+      holdSeconds: 10,
+      cycleCount: 3,
+      baselineSeconds: 10,
+      recoverySeconds: 10,
+      initialDirection: -1,
+    };
+    startRec("p0-observation-3x10s", config);
+    const sessionStart = startedAtRef.current;
+    const initialPitch = oRef.current.betaEma ?? oRef.current.beta ?? pitch;
+    setTraceAnchorPitch(initialPitch);
+    setTraceSessionStart(sessionStart);
+    setGuidedActive(true);
+    guidedRunningRef.current = true;
+
+    const requireCue = async (
+      cue: Parameters<typeof playClip>[0],
+      meta: Record<string, unknown>,
+    ) => {
+      const result = await coach(cue, meta);
+      if (result === "ended") return true;
+      mark("session_end", { outcome: "audio_unavailable", cue, result });
+      setGuidedLabel("AUDIO UNAVAILABLE • Stop and use Test voice before restarting");
+      return false;
+    };
+
+    const markQuietWindow = (meta: Record<string, unknown>) => {
+      const endMs = performance.now() - startedAtRef.current;
+      markAt(Math.max(0, endMs - 2000), "prehold_start", meta);
+      markAt(endMs, "prehold_end", {
+        ...meta,
+        source: "continuous_trace_pre_inhale_window",
+      });
+    };
+
+    try {
+      enterGuidedStage("baseline");
+      mark("baseline_start");
+      enterGuidedPhase("baseline", "BREATHE NORMALLY • First 10 seconds");
+      const baselineStartedAt = performance.now();
+      if (!(await requireCue("p0_rest", { phase: "baseline" }))) return;
+      await waitUntil(
+        baselineStartedAt + config.baselineSeconds * 1000,
+        "BREATHE NORMALLY • First 10 seconds",
+      );
+      mark("baseline_end");
+
+      for (let cycle = 1; cycle <= config.cycleCount && guidedRunningRef.current; cycle++) {
+        const meta: Record<string, unknown> = {
+          holdIndex: cycle,
+          role: "observation",
+          cycleNumber: cycle,
+        };
+        markQuietWindow(meta);
+        enterGuidedStage("cycle");
+        enterGuidedPhase(
+          "inhale",
+          `DEEP BREATH • Cycle ${cycle} of ${config.cycleCount}`,
+          meta,
+        );
+        mark("inhale_start", meta);
+        if (!(await requireCue("p0_inhale", meta))) return;
+
+        enterGuidedPhase(
+          "hold",
+          `HOLD • Cycle ${cycle} of ${config.cycleCount}`,
+          meta,
+        );
+        const holdStartedAt = performance.now();
+        mark("hold_start", meta);
+        const holdCompleted = await waitThroughTimedHold(
+          holdStartedAt,
+          config.holdSeconds,
+          `HOLD • Cycle ${cycle} of ${config.cycleCount}`,
+          meta,
+        );
+        if (!holdCompleted) {
+          mark("session_end", {
+            outcome: "audio_unavailable",
+            cue: "p0_five_seconds_left",
+          });
+          return;
+        }
+
+        mark("release", meta);
+        const releaseStartedAt = performance.now();
+        enterGuidedPhase(
+          "release",
+          `BREATHE NORMALLY • Cycle ${cycle} complete`,
+          meta,
+        );
+        if (!(await requireCue("p0_release", meta))) return;
+        enterGuidedPhase(
+          "rest",
+          cycle < config.cycleCount
+            ? `BREATHE NORMALLY • Next breath in 10 seconds`
+            : "BREATHE NORMALLY • Final recovery",
+          meta,
+        );
+        await waitUntil(
+          releaseStartedAt + config.recoverySeconds * 1000,
+          cycle < config.cycleCount
+            ? `BREATHE NORMALLY • Next breath in 10 seconds`
+            : "BREATHE NORMALLY • Final recovery",
+        );
+        mark("recovery_end", meta);
+      }
+
+      if (guidedRunningRef.current) {
+        enterGuidedStage("complete");
+        enterGuidedPhase("complete", "COMPLETE • Three cycles recorded");
+        mark("session_end", { outcome: "observation_complete", cycleCount: 3 });
+      }
+    } finally {
+      setGuidedActive(false);
+      setGuidedStage("idle");
+      setGuidedPhase("IDLE");
+      setGuidedLabel("");
+      setStepCountdown(0);
+      guidedRunningRef.current = false;
+      if (recordingRef.current) {
+        await sleep(400);
+        stopRec();
+      }
+    }
+  };
+
+  // Retained only for deterministic replay development of older guided files;
+  // the live Start button invokes the observation sequence above.
+  const startGuidedLegacy = async () => {
     // Keep audio activation in the Start button's user gesture on mobile.
     unlockAudio();
     if (!granted) {
@@ -807,6 +939,8 @@ export default function LabPage() {
     const config = {
       holdSeconds: guidedHoldSec,
       practiceHoldCount: guidedPracticeGoal,
+      cycleCount: 3,
+      baselineSeconds: 10,
       recoverySeconds: guidedRecoverySec,
       initialDirection: -1 as const,
     };
@@ -1247,7 +1381,7 @@ export default function LabPage() {
               className="rounded px-1.5 py-0.5 text-[9px] uppercase tracking-wider"
               style={{ background: "#0c2d48", color: "#7dd3fc", border: "1px solid #0369a1" }}
             >
-              v0.6
+              v0.7
             </span>
           </h1>
           <a href="/" className="text-xs underline opacity-70">
@@ -1255,9 +1389,8 @@ export default function LabPage() {
           </a>
         </div>
         <p className="text-xs opacity-70 leading-relaxed">
-          One rehearsal teaches the sequence, three matching calibration holds learn a
-          comfortable relative target, and an extended coached practice run collects
-          repeated breathing cycles.
+          A continuous observation run: 10 seconds of normal breathing, a deep breath and
+          10-second hold, then 10 seconds of normal breathing. Repeat three times.
         </p>
 
         {!granted ? (
@@ -1283,10 +1416,19 @@ export default function LabPage() {
               <div className="flex items-center justify-between gap-3">
                 <div className="text-xs uppercase tracking-wider opacity-60">P0 guided run</div>
                 <div className="text-[10px] uppercase tracking-wider" style={{ color: "#38bdf8" }}>
-                  rehearsal → 3 calibration → {guidedPracticeGoal} practice
+                  10s normal → 10s hold → repeat ×3
                 </div>
               </div>
-              <GuidedJourney stage={guidedStage} practiceGoal={guidedPracticeGoal} />
+              <GuidedJourney stage={guidedStage} />
+              {traceAnchorPitch != null && traceSessionStart != null && (
+                <ContinuousBreathingTrace
+                  pitch={pitch}
+                  anchorPitch={traceAnchorPitch}
+                  sessionStartedAt={traceSessionStart}
+                  active={guidedActive}
+                  events={events}
+                />
+              )}
               <div
                 className="rounded-md p-2 flex items-center justify-between gap-3"
                 style={{
@@ -1307,7 +1449,7 @@ export default function LabPage() {
                   <div className="opacity-60">
                     {audioStatus === "error"
                       ? "Turn up media volume, then tap Test voice again."
-                      : "You should hear “Take a deep breath in and hold.”"}
+                      : "You should hear the complete deep-breath instruction."}
                   </div>
                 </div>
                 <button
@@ -1319,48 +1461,9 @@ export default function LabPage() {
                   Test voice
                 </button>
               </div>
-              <div className="grid grid-cols-2 gap-2">
-                <select
-                  value={guidedHoldSec}
-                  onChange={(e) => setGuidedHoldSec(parseInt(e.target.value))}
-                  disabled={recording}
-                  className="rounded p-2 text-xs"
-                  style={{ background: "#0a0c10", color: "#e7e5e4", border: "1px solid #303441" }}
-                >
-                  {[8, 10, 12, 15, 20].map((n) => (
-                    <option key={n} value={n}>
-                      {n}s hold
-                    </option>
-                  ))}
-                </select>
-                <select
-                  value={guidedRecoverySec}
-                  onChange={(e) => setGuidedRecoverySec(parseInt(e.target.value))}
-                  disabled={recording}
-                  className="rounded p-2 text-xs"
-                  style={{ background: "#0a0c10", color: "#e7e5e4", border: "1px solid #303441" }}
-                >
-                  {[15, 20, 30].map((n) => (
-                    <option key={n} value={n}>{n}s minimum rest</option>
-                  ))}
-                </select>
-                <select
-                  value={guidedPracticeGoal}
-                  onChange={(e) => setGuidedPracticeGoal(parseInt(e.target.value))}
-                  disabled={recording}
-                  className="col-span-2 rounded p-2 text-xs"
-                  style={{ background: "#0a0c10", color: "#e7e5e4", border: "1px solid #303441" }}
-                >
-                  {[2, 5, 8, 10].map((n) => (
-                    <option key={n} value={n}>
-                      {n} practice holds for data collection
-                    </option>
-                  ))}
-                </select>
-              </div>
               <div className="text-[11px] leading-relaxed opacity-70">
                 Phone placement: flat on the belly with the charging port pointing toward
-                the patient&apos;s face. This makes inhale rise on both live displays.
+                the patient&apos;s face. Inhale is normalized upward on the continuous trace.
               </div>
               {!guidedActive ? (
                 <button
@@ -1372,9 +1475,6 @@ export default function LabPage() {
                 </button>
               ) : (
                 <>
-                  {liveGate && (
-                    <LiveTargetGate pitch={pitch} gate={liveGate} phase={guidedPhase} />
-                  )}
                   <div className="text-center py-2">
                     <div className="text-2xl font-semibold tracking-widest" style={{ color: guidedPhaseColor(guidedPhase) }}>
                       {guidedPhase}
@@ -1394,9 +1494,9 @@ export default function LabPage() {
                 </>
               )}
               <div className="text-[11px] opacity-60 leading-relaxed">
-                One prerecorded voice announces REST, READY, INHALE, HOLD, and RELEASE.
-                Prompts never overlap. Invalid calibration breaths are repeated rather than
-                counted, up to six attempts.
+                The sequence never rejects or repeats a breath. All three cycles and the
+                complete baseline-to-recovery trace are recorded; quality checks are shown
+                only after the run.
               </div>
             </div>
 
@@ -1601,18 +1701,12 @@ export default function LabPage() {
   );
 }
 
-function GuidedJourney({
-  stage,
-  practiceGoal,
-}: {
-  stage: GuidedStage;
-  practiceGoal: number;
-}) {
+function GuidedJourney({ stage }: { stage: GuidedStage }) {
   const currentIndex = GUIDED_JOURNEY.findIndex((item) => item.id === stage);
   const current = currentIndex >= 0 ? GUIDED_JOURNEY[currentIndex] : null;
   return (
     <div className="rounded-md p-2.5" style={{ background: "#0a0c10", border: "1px solid #303441" }}>
-      <div className="grid grid-cols-3 sm:grid-cols-6 gap-1.5">
+      <div className="grid grid-cols-3 gap-1.5">
         {GUIDED_JOURNEY.map((item, index) => {
           const isCurrent = index === currentIndex;
           const isComplete = currentIndex >= 0 && index < currentIndex;
@@ -1627,11 +1721,7 @@ function GuidedJourney({
               }}
             >
               <div className="text-[10px] font-semibold uppercase tracking-wide">{item.title}</div>
-              <div className="mt-1 text-[9px] leading-tight opacity-70">
-                {item.id === "practice"
-                  ? `Collect ${practiceGoal} blue-in-green holds.`
-                  : item.detail}
-              </div>
+              <div className="mt-1 text-[9px] leading-tight opacity-70">{item.detail}</div>
             </div>
           );
         })}
@@ -1639,7 +1729,173 @@ function GuidedJourney({
       <div className="mt-2 text-[10px] leading-relaxed" style={{ color: current ? "#bae6fd" : "#a8a29e" }}>
         {current
           ? `Collecting now: ${current.data}.`
-          : `Journey: setup → rehearsal → baseline → three matching calibrations → ${practiceGoal} successful practices → review.`}
+          : "Journey: normal breathing → three identical hold cycles → review."}
+      </div>
+    </div>
+  );
+}
+
+function ContinuousBreathingTrace({
+  pitch,
+  anchorPitch,
+  sessionStartedAt,
+  active,
+  events,
+}: {
+  pitch: number;
+  anchorPitch: number;
+  sessionStartedAt: number;
+  active: boolean;
+  events: LabEvent[];
+}) {
+  const [history, setHistory] = useState<Array<{ t: number; excursion: number }>>([]);
+  const scrollRef = useRef<HTMLDivElement | null>(null);
+
+  useEffect(() => {
+    setHistory([]);
+  }, [sessionStartedAt]);
+
+  useEffect(() => {
+    if (!active) return;
+    const elapsed = Math.max(0, performance.now() - sessionStartedAt);
+    const excursion = -(pitch - anchorPitch);
+    setHistory((previous) => [...previous, { t: elapsed, excursion }]);
+  }, [active, anchorPitch, pitch, sessionStartedAt]);
+
+  useEffect(() => {
+    if (!active || !scrollRef.current) return;
+    scrollRef.current.scrollLeft = scrollRef.current.scrollWidth;
+  }, [active, history.length]);
+
+  const chartHeight = 230;
+  const pad = { top: 24, right: 18, bottom: 28, left: 42 };
+  const lastMs = Math.max(history.at(-1)?.t ?? 0, events.at(-1)?.t ?? 0, 15000);
+  const chartWidth = Math.max(360, pad.left + pad.right + (lastMs / 1000) * 18);
+  const values = history.map((point) => point.excursion);
+  const observedMin = Math.min(-1, ...values);
+  const observedMax = Math.max(1, ...values);
+  const paddingDeg = Math.max(0.5, (observedMax - observedMin) * 0.12);
+  const minimum = observedMin - paddingDeg;
+  const maximum = observedMax + paddingDeg;
+  const range = Math.max(1, maximum - minimum);
+  const plotHeight = chartHeight - pad.top - pad.bottom;
+  const xFor = (timeMs: number) => pad.left + (timeMs / 1000) * 18;
+  const yFor = (value: number) => pad.top + ((maximum - value) / range) * plotHeight;
+  const path = history
+    .map(
+      (point, index) =>
+        `${index === 0 ? "M" : "L"}${xFor(point.t).toFixed(1)},${yFor(point.excursion).toFixed(1)}`,
+    )
+    .join(" ");
+  const markerEvents = events.filter(
+    (event) =>
+      ["inhale_start", "hold_start", "release"].includes(event.type) ||
+      (event.type === "coach_cue" && event.meta?.cue === "p0_five_seconds_left"),
+  );
+  const markerLabel = (event: LabEvent) => {
+    if (event.type === "inhale_start") return "DEEP BREATH";
+    if (event.type === "hold_start") return "HOLD";
+    if (event.type === "release") return "RELEASE";
+    return "5s LEFT";
+  };
+  const markerColor = (event: LabEvent) => {
+    if (event.type === "inhale_start") return "#38bdf8";
+    if (event.type === "hold_start") return "#a78bfa";
+    if (event.type === "release") return "#fb7185";
+    return "#f59e0b";
+  };
+
+  return (
+    <div className="rounded-md overflow-hidden" style={{ background: "#0a0c10", border: "1px solid #303441" }}>
+      <div className="px-3 py-2 flex items-center justify-between gap-3 text-[10px] uppercase tracking-wider">
+        <span>Continuous breathing trace</span>
+        <span className="opacity-60">
+          inhale ↑ • range {minimum.toFixed(1)}° to {maximum.toFixed(1)}°
+        </span>
+      </div>
+      <div ref={scrollRef} className="overflow-x-auto" aria-label="Continuously growing breathing trace">
+        <svg
+          width={chartWidth}
+          height={chartHeight}
+          role="img"
+          aria-label="A continuous phone-measured breathing trace from baseline through all three breath holds. Inspiration moves upward and the vertical scale expands as larger breaths arrive."
+        >
+          {[0.25, 0.5, 0.75].map((fraction) => (
+            <line
+              key={fraction}
+              x1={pad.left}
+              x2={chartWidth - pad.right}
+              y1={pad.top + plotHeight * fraction}
+              y2={pad.top + plotHeight * fraction}
+              stroke="#253044"
+              strokeWidth="1"
+            />
+          ))}
+          <line
+            x1={pad.left}
+            x2={chartWidth - pad.right}
+            y1={yFor(0)}
+            y2={yFor(0)}
+            stroke="#64748b"
+            strokeWidth="1"
+          />
+          {Array.from({ length: Math.floor(lastMs / 5000) + 1 }, (_, index) => index * 5000).map(
+            (time) => (
+              <g key={time}>
+                <line
+                  x1={xFor(time)}
+                  x2={xFor(time)}
+                  y1={pad.top}
+                  y2={chartHeight - pad.bottom}
+                  stroke="#1f2937"
+                  strokeWidth="1"
+                />
+                <text x={xFor(time) + 2} y={chartHeight - 8} fill="#94a3b8" fontSize="9">
+                  {Math.round(time / 1000)}s
+                </text>
+              </g>
+            ),
+          )}
+          {markerEvents.map((event, index) => (
+            <g key={`${event.type}-${event.t}-${index}`}>
+              <line
+                x1={xFor(event.t)}
+                x2={xFor(event.t)}
+                y1={pad.top}
+                y2={chartHeight - pad.bottom}
+                stroke={markerColor(event)}
+                strokeWidth="1.5"
+              />
+              <text
+                x={xFor(event.t) + 3}
+                y={12 + (index % 2) * 10}
+                fill={markerColor(event)}
+                fontSize="8"
+              >
+                {markerLabel(event)}
+              </text>
+            </g>
+          ))}
+          {path && (
+            <path
+              d={path}
+              fill="none"
+              stroke="#38bdf8"
+              strokeWidth="2.5"
+              strokeLinejoin="round"
+              strokeLinecap="round"
+            />
+          )}
+          <text x="4" y={pad.top + 4} fill="#94a3b8" fontSize="9">
+            {maximum.toFixed(1)}°
+          </text>
+          <text x="12" y={Math.min(chartHeight - pad.bottom - 2, yFor(0) + 3)} fill="#94a3b8" fontSize="9">
+            0°
+          </text>
+          <text x="4" y={chartHeight - pad.bottom} fill="#94a3b8" fontSize="9">
+            {minimum.toFixed(1)}°
+          </text>
+        </svg>
       </div>
     </div>
   );

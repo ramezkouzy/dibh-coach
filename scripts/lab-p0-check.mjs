@@ -108,7 +108,7 @@ for (const direction of [-1, 1]) {
   assert.equal(
     first.summary.learnedTarget.experimentalTrainingToleranceDeg,
     1,
-    "P0.6 should use the wider one-degree minimum half-window",
+    "the replay analyzer should preserve the one-degree legacy target half-window",
   );
   assert.equal(first.summary.practice.length, 2);
   for (const practice of first.summary.practice) {
@@ -156,4 +156,15 @@ const abortedAnalysis = analyzeLabRecording(aborted);
 assert.equal(abortedAnalysis.holds.find((hold) => hold.index === 4).valid, false);
 assert.ok(abortedAnalysis.issues.includes("hold_4:practice_hold_aborted"));
 
-console.log("Lab P0 synthetic replay checks passed for both pitch directions, calibration consistency, and abort handling.");
+const observation = synthRecording(-1, 3);
+for (const event of observation.events) {
+  if (event.meta?.holdIndex) event.meta.role = "observation";
+}
+const observationAnalysis = analyzeLabRecording(observation);
+assert.equal(observationAnalysis.holds.length, 3);
+assert.ok(observationAnalysis.holds.every((hold) => hold.role === "observation"));
+assert.equal(observationAnalysis.summary.learnedTarget.available, false);
+assert.equal(observationAnalysis.summary.learnedDirection, -1);
+assert.ok(observationAnalysis.summary.signedExcursionSdDeg < 0.2);
+
+console.log("Lab P0 synthetic replay checks passed for both pitch directions, calibration consistency, abort handling, and unconditional observation roles.");

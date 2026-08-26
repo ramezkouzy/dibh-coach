@@ -20,7 +20,7 @@ type TraceSegment = {
 
 type TraceHold = {
   index: number;
-  role: "learn" | "practice";
+  role: "learn" | "practice" | "observation";
   valid: boolean;
   direction?: number | null;
   relativeExcursionDeg?: number | null;
@@ -111,7 +111,7 @@ export default function LabTrace({ recording }: { recording: TraceRecording }) {
     <section className="flex flex-col gap-4" aria-label="Breath-hold trace analysis">
       <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
         <TraceStat
-          label="valid holds"
+          label="quality-valid holds"
           value={`${summary.validHoldCount ?? 0}/${summary.totalHoldCount ?? 0}`}
         />
         <TraceStat
@@ -124,6 +124,21 @@ export default function LabTrace({ recording }: { recording: TraceRecording }) {
           value={`${recording.analysis.quality?.effectiveSampleRateHz ?? "—"} Hz`}
         />
       </div>
+
+      {recording.scenario?.includes("observation") && (
+        <div
+          className="rounded-md p-3 text-xs leading-relaxed"
+          style={{ background: "#0c2d48", border: "1px solid #0369a1", color: "#bae6fd" }}
+        >
+          <div className="font-semibold">All three cycles were recorded unconditionally</div>
+          <div className="mt-1 opacity-90">
+            “Quality-valid” is post-run description only. Visible movement may still fail
+            that label when it is less than 1.5° from the preceding quiet window, never
+            settles into a stable plateau, or begins from a moving baseline. The full trace
+            remains available either way.
+          </div>
+        </div>
+      )}
 
       {target && !target.available && (target.learnHoldCount ?? 0) >= 3 && (
         <div
@@ -243,7 +258,7 @@ export default function LabTrace({ recording }: { recording: TraceRecording }) {
                 fill="#e7e5e4"
                 fontSize="12"
               >
-                {hold.role === "learn" ? "L" : "P"}{hold.index}
+                {hold.role === "observation" ? "O" : hold.role === "learn" ? "L" : "P"}{hold.index}
               </text>
             );
           })}
@@ -312,20 +327,20 @@ export default function LabTrace({ recording }: { recording: TraceRecording }) {
               <path
                 d={line.path}
                 fill="none"
-                stroke={line.role === "learn" ? "#38bdf8" : "#a78bfa"}
-                strokeWidth={line.role === "learn" ? "1.7" : "2.4"}
-                strokeDasharray={line.role === "learn" ? undefined : "7 4"}
+                stroke={line.role === "observation" ? "#38bdf8" : line.role === "learn" ? "#38bdf8" : "#a78bfa"}
+                strokeWidth={line.role === "practice" ? "2.4" : "1.7"}
+                strokeDasharray={line.role === "practice" ? "7 4" : undefined}
                 opacity={line.valid ? 0.9 : 0.45}
               >
-                <title>{`${line.role === "learn" ? "Learn" : "Practice"} hold ${line.index}`}</title>
+                <title>{`${line.role === "observation" ? "Observation" : line.role === "learn" ? "Learn" : "Practice"} hold ${line.index}`}</title>
               </path>
               <text
                 x={Math.min(FULL_WIDTH - ALIGNED_MARGIN.right - 18, line.endX + 4)}
                 y={line.endY}
-                fill={line.role === "learn" ? "#38bdf8" : "#a78bfa"}
+                fill={line.role === "practice" ? "#a78bfa" : "#38bdf8"}
                 fontSize="12"
               >
-                {line.role === "learn" ? "L" : "P"}{line.index}
+                {line.role === "observation" ? "O" : line.role === "learn" ? "L" : "P"}{line.index}
               </text>
             </g>
           ))}
@@ -343,7 +358,7 @@ export default function LabTrace({ recording }: { recording: TraceRecording }) {
             >
               <div className="mb-2 flex items-center justify-between">
                 <span className="font-semibold">
-                  {hold.role === "learn" ? "Learn" : "Practice"} {hold.index}
+                  {hold.role === "observation" ? "Observation" : hold.role === "learn" ? "Learn" : "Practice"} {hold.index}
                 </span>
                 <span className="opacity-60">{hold.valid ? "valid" : "review"}</span>
               </div>

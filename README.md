@@ -178,24 +178,17 @@ SD percentiles, ASCII traces, and answers the question "would the current
 algorithm have classified this hold as stable" — used heavily during
 threshold tuning.
 
-The current `dibh-lab/v3` guided harness is hands-free after Start. One short
-rehearsal teaches REST, READY, INHALE, HOLD, and RELEASE before measurement.
-The harness then searches up to six calibration attempts for three matching
-holds and collects a selectable 2, 5, 8, or 10 successful coached practice
-holds, allowing twice as many attempts as the selected goal. Every attempt
-captures a quiet relative anchor immediately before the READY prompt. The
-tightest consistent calibration trio sets a fixed session target by robust
-median. During calibration and practice, an RPM-style live
-breathing curve and blue position bar are shown against the same green target
-range. The 15-second curve keeps running through RELEASE and recovery so a
-therapist looking at the participant's phone can see inspiration rise,
-expiration fall, and the held plateau in real time.
+The current `dibh-lab/v3` guided harness is an unconditional three-cycle
+observation run. Recording begins with 10 seconds of normal breathing. Each
+cycle then says “Take a deep breath in and hold it for ten seconds,” records a
+10-second hold with a spoken five-seconds-left cue, says “Release and breathe
+normally,” and records 10 seconds of recovery. No setup rehearsal, calibration,
+target band, acquisition gate, correction, abort, or retry changes the sequence.
 
-Practice must acquire the range within five seconds. A sustained drift gets
-one correction; if the user cannot return, the attempt aborts to RELEASE and
-restarts after recovery instead of asking for repeated inhale/exhale changes
-inside one breath hold. The HOLD prompt states the selected duration and the
-visible countdown begins when HOLD is called.
+The live display is a continuously growing EKG-style trace from the first
+baseline sample through final recovery. With the charging port toward the face,
+inhalation is normalized upward. The horizontal strip retains all prior points
+and auto-scrolls, while the vertical scale expands when a deeper breath arrives.
 
 Lab P0 uses a dedicated prerecorded prompt set and awaits each MP3 before the
 next instruction, with a bounded timeout so audio cannot freeze the runner.
@@ -203,7 +196,7 @@ Audio is activated inside the motion and Start taps on mobile, and a Test voice
 control confirms playback before the run. If the opening prompt fails, the run
 stops instead of continuing silently. All cues reuse that same activated audio
 element for iPhone reliability. A 10-second hold includes a spoken five-second
-remaining cue, and entering the target band plays a dedicated two-note ding.
+remaining cue.
 JSON exports record phase transitions plus prompt start/end
 events, allowing the trace view to align spoken instructions with measured
 inhale, hold, release, and recovery motion.
@@ -212,7 +205,9 @@ The export stores all 13 hardware channels plus EMA pitch, exact phase and
 coaching markers, versioned detector parameters, stable-segment boundaries,
 and separate metrics for phone-pose consistency, absolute plateau consistency,
 and phone-measured abdominal-excursion consistency. These are training proxies,
-not measurements of lung volume or treatment suitability.
+not measurements of lung volume or treatment suitability. A breath-quality
+label is calculated only after all three cycles finish; it never suppresses
+visible motion or changes the run.
 
 ```bash
 pnpm lab:p0:check
