@@ -242,6 +242,8 @@ const POSITION_LOCATIONS = [
   ["custom", "Custom location"],
 ] as const;
 
+const PARTICIPANT_CODES = ["Vranich001", "Mitchell002", "Pearce003"] as const;
+
 const FREE_EVENTS = [
   ["prehold_start", "Prehold start"],
   ["prehold_end", "Prehold end"],
@@ -316,6 +318,7 @@ export default function LabPage() {
   const [positionRuns, setPositionRuns] = useState<PositionRun[]>([]);
   const [labView, setLabView] = useState<LabView>("home");
   const [selectedMode, setSelectedMode] = useState<LabMode>("guided");
+  const [participantCodeSelection, setParticipantCodeSelection] = useState("");
   const [participantCode, setParticipantCode] = useState("");
   const [siteCode, setSiteCode] = useState("");
   const [runLabel, setRunLabel] = useState("");
@@ -653,7 +656,7 @@ export default function LabPage() {
     const recordingBase = {
       schema: "dibh-lab/v3" as const,
       sessionId: sessionIdRef.current,
-      appBuild: "lab-p1.1",
+      appBuild: "lab-p1.2",
       algorithm: LAB_P0_ALGORITHM,
       scenario: activeScenarioRef.current,
       note,
@@ -2303,7 +2306,7 @@ export default function LabPage() {
               className="rounded px-1.5 py-0.5 text-[9px] uppercase tracking-wider"
               style={{ background: "#0c2d48", color: "#7dd3fc", border: "1px solid #0369a1" }}
             >
-              v1.1
+              v1.2
             </span>
           </h1>
           <a href="/" className="text-xs underline opacity-70">
@@ -2343,16 +2346,37 @@ export default function LabPage() {
               </div>
               <label className="text-[11px] opacity-75 flex flex-col gap-1">
                 Participant code <span style={{ color: "#fda4af" }}>(required)</span>
-                <input
-                  value={participantCode}
-                  onChange={(event) => setParticipantCode(event.target.value)}
-                  maxLength={48}
-                  autoCapitalize="none"
-                  placeholder="Example: SITE01-P004"
+                <select
+                  value={participantCodeSelection}
+                  onChange={(event) => {
+                    const selection = event.target.value;
+                    setParticipantCodeSelection(selection);
+                    setParticipantCode(selection === "manual" ? "" : selection);
+                  }}
                   className="rounded p-2.5 text-sm"
                   style={{ background: "#0a0c10", color: "#e7e5e4", border: "1px solid #303441" }}
-                />
+                >
+                  <option value="">Choose a participant code</option>
+                  {PARTICIPANT_CODES.map((code) => (
+                    <option key={code} value={code}>{code}</option>
+                  ))}
+                  <option value="manual">Enter another code…</option>
+                </select>
               </label>
+              {participantCodeSelection === "manual" && (
+                <label className="text-[11px] opacity-75 flex flex-col gap-1">
+                  Other participant code <span style={{ color: "#fda4af" }}>(required)</span>
+                  <input
+                    value={participantCode}
+                    onChange={(event) => setParticipantCode(event.target.value)}
+                    maxLength={48}
+                    autoCapitalize="none"
+                    placeholder="Example: SITE01-P004"
+                    className="rounded p-2.5 text-sm"
+                    style={{ background: "#0a0c10", color: "#e7e5e4", border: "1px solid #303441" }}
+                  />
+                </label>
+              )}
               <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
                 <label className="text-[11px] opacity-75 flex flex-col gap-1">
                   Site or group code (optional)
@@ -2375,6 +2399,9 @@ export default function LabPage() {
                     className="rounded p-2.5 text-sm"
                     style={{ background: "#0a0c10", color: "#e7e5e4", border: "1px solid #303441" }}
                   />
+                  <span className="text-[10px] opacity-65">
+                    Describe the breath-hold type, phone position, or anything different about this run.
+                  </span>
                 </label>
               </div>
               {centralCollection === "ready" && (
