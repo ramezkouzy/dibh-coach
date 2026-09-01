@@ -30,8 +30,11 @@ const LAB_PHRASES = {
   p0_practice_intro:
     "Calibration complete. Coaching begins. Breathe normally for three breaths, then take a deep breath in and hold for ten seconds. I will coach you toward the target range.",
   p0_rest: "Rest and breathe normally.",
+  p0_three_regular_breaths: "Breathe normally for three regular breaths.",
   p0_ready: "Get ready. Your deep breath is next.",
   p0_inhale: "Take a deep breath in and hold it for ten seconds.",
+  p0_guided_hold_10: "Take a deep breath in, and hold for ten seconds.",
+  p0_guided_hold_20: "Take a deep breath in, and hold for twenty seconds.",
   p0_hold: "Hold now.",
   p0_hold_8: "Eight-second hold starts now.",
   p0_hold_10: "Ten-second hold starts now.",

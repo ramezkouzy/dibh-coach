@@ -183,6 +183,7 @@ type DeviceMetadata = {
 };
 
 type LabMode = "guided" | "free" | "position-study";
+type FreeProtocol = "calibration" | "guided-10" | "guided-20";
 type LabView = "home" | "run" | "results";
 type SubmissionState =
   | { status: "idle" }
@@ -329,6 +330,7 @@ export default function LabPage() {
   const [imported, setImported] = useState<Recording | null>(null);
   const [importError, setImportError] = useState<string | null>(null);
   const [freeMode, setFreeMode] = useState<"standard" | "position-study">("standard");
+  const [freeProtocol, setFreeProtocol] = useState<FreeProtocol>("calibration");
   const [positionLocation, setPositionLocation] = useState<string>(POSITION_LOCATIONS[0][0]);
   const [positionCustomLocation, setPositionCustomLocation] = useState("");
   const [positionAlignment, setPositionAlignment] = useState<"midline" | "left" | "right">("midline");
@@ -1073,6 +1075,156 @@ export default function LabPage() {
     }
     setStepCountdown(0);
     return guidedRunningRef.current;
+  };
+
+  const startFreeGuidedHold = async (holdSeconds: 10 | 20) => {
+    unlockAudio();
+    if (!granted) {
+      await requestPerm();
+      return;
+    }
+    if (recording) return;
+
+    const config: GuidedConfig = {
+      holdSeconds,
+      practiceHoldCount: 0,
+      requiredNormalCycles: 3,
+      cycleCount: 1,
+      baselineSeconds: 0,
+      recoverySeconds: 0,
+      initialDirection: -1,
+    };
+    startRec(`Guided ${holdSeconds}-second hold — no coaching`, config);
+    const sessionStart = startedAtRef.current;
+    const initialPitch = oRef.current.betaEma ?? oRef.current.beta ?? pitch;
+    setTraceAnchorPitch(initialPitch);
+    setTraceSessionStart(sessionStart);
+    setGuidedActive(true);
+    guidedRunningRef.current = true;
+
+    const meta: Record<string, unknown> = {
+      holdIndex: 1,
+      role: "observation",
+      cycleNumber: 1,
+      guidedHoldSeconds: holdSeconds,
+      coaching: false,
+    };
+    const requireCue = async (cue: Parameters<typeof playClip>[0]) => {
+      const result = await coach(cue, meta);
+      if (result === "ended") return true;
+      mark("session_end", { ...meta, outcome: "audio_unavailable", cue, result });
+      setGuidedLabel("AUDIO UNAVAILABLE • Stop and use Test voice before restarting");
+      guidedRunningRef.current = false;
+      return false;
+    };
+    const signalPoints = () =>
+      samplesRef.current
+        .map((sample) => ({ t: sample[0], p: sample[3] ?? sample[2] }))
+        .filter((point): point is { t: number; p: number } =>
+          point.p != null && Number.isFinite(point.p),
+        );
+
+    try {
+      mark("baseline_start", meta);
+      mark("breathing_cycle_observation_start", {
+        ...meta,
+        requiredCycles: 3,
+        source: "physiology_driven",
+      });
+      enterGuidedStage("breathing");
+      enterGuidedPhase("rest", "BREATHE NORMALLY • Waiting for 3 regular breaths", meta);
+      if (!(await requireCue("p0_three_regular_breaths"))) return;
+
+      let cycles: BreathingCycleResult | null = null;
+      while (guidedRunningRef.current && !cycles) {
+        const result = detectRegularBreathingCycles(signalPoints(), {
+          direction: config.initialDirection,
+          startMs: 0,
+          requiredCycles: 3,
+        }) as BreathingCycleResult;
+        setStepCountdown(result.qualifiedPeakCount ?? 0);
+        setGuidedLabel(`BREATHE NORMALLY • ${result.qualifiedPeakCount ?? 0} of 3 regular breaths`);
+        if (
+          result.ready &&
+          result.windowStartMs != null &&
+          result.windowEndMs != null &&
+          result.peaks &&
+          result.troughs &&
+          result.meanInspiratoryPeakPitchDeg != null &&
+          result.meanAmplitudeDeg != null
+        ) {
+          cycles = result;
+          const cycleMeta = {
+            ...meta,
+            source: "three_complete_regular_cycles",
+            direction: result.direction,
+            requiredCycles: 3,
+            peakTimesMs: result.peaks.map((peak) => peak.t),
+            peakPitchesDeg: result.peaks.map((peak) => peak.pitchDeg),
+            troughTimesMs: result.troughs.map((trough) => trough.t),
+            meanInspiratoryPeakPitchDeg: result.meanInspiratoryPeakPitchDeg,
+            meanCyclePeriodSec: result.meanCyclePeriodSec,
+            cyclePeriodCv: result.cyclePeriodCv,
+            meanAmplitudeDeg: result.meanAmplitudeDeg,
+            amplitudeCv: result.amplitudeCv,
+          };
+          markAt(result.windowStartMs, "prehold_start", cycleMeta);
+          markAt(result.windowEndMs, "prehold_end", cycleMeta);
+          mark("breathing_cycles_qualified", cycleMeta);
+        } else {
+          await sleep(200);
+        }
+      }
+      if (!cycles || !guidedRunningRef.current) return;
+
+      setStepCountdown(0);
+      mark("baseline_end", meta);
+      enterGuidedStage("cycle");
+      enterGuidedPhase("inhale", `DEEP BREATH IN AND HOLD • ${holdSeconds} seconds`, meta);
+      mark("inhale_start", meta);
+      if (!(await requireCue(holdSeconds === 10 ? "p0_guided_hold_10" : "p0_guided_hold_20"))) return;
+
+      const holdStartedAt = performance.now();
+      mark("hold_start", {
+        ...meta,
+        source: "guided_audio_cue_complete",
+        direction: cycles.direction,
+        localAnchorPitchDeg: cycles.meanInspiratoryPeakPitchDeg,
+        normalPeakPitchesDeg: cycles.peaks?.map((peak) => peak.pitchDeg),
+        normalMeanAmplitudeDeg: cycles.meanAmplitudeDeg,
+      });
+      enterGuidedPhase("hold", `HOLD • ${holdSeconds} seconds`, meta);
+      const completed = await waitThroughTimedHold(
+        holdStartedAt,
+        holdSeconds,
+        `HOLD • ${holdSeconds} seconds`,
+        meta,
+      );
+      if (!completed) return;
+
+      mark("release", { ...meta, outcome: `${holdSeconds}_second_hold_complete` });
+      enterGuidedPhase("release", "RELEASE • Breathe normally", meta);
+      if (!(await requireCue("p0_release"))) return;
+      mark("recovery_end", meta);
+      mark("session_end", {
+        ...meta,
+        outcome: "free_guided_hold_complete",
+        holdSeconds,
+      });
+      enterGuidedStage("complete");
+      enterGuidedPhase("complete", `COMPLETE • ${holdSeconds}-second hold recorded`, meta);
+    } finally {
+      setGuidedActive(false);
+      setGuidedStage("idle");
+      setGuidedPhase("IDLE");
+      setGuidedLabel("");
+      setStepCountdown(0);
+      guidedRunningRef.current = false;
+      if (recordingRef.current) {
+        await sleep(250);
+        stopRec();
+      }
+    }
   };
 
   const startGuidedObservationLegacy = async () => {
@@ -2529,7 +2681,7 @@ export default function LabPage() {
               <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
                 {([
                   ["guided", "Continue to guided session", "Calibrate, then complete coached breath holds."],
-                  ["free", "Continue to free recording", "Record an open trace with manual event markers."],
+                  ["free", "Continue to free recording", "Choose an uncoached trace or a guided 10- or 20-second hold."],
                 ] as const).map(([mode, title, detail]) => (
                   <button
                     key={mode}
@@ -2689,29 +2841,43 @@ export default function LabPage() {
 
               {freeMode === "standard" ? (
                 <>
-                  <select
-                    value={scenario}
-                    onChange={(e) => setScenario(e.target.value)}
-                    disabled={recording}
-                    className="rounded-lg px-3 py-2.5 text-base"
-                    style={{ background: LAB_UI.surface, color: LAB_UI.text, border: `1px solid ${LAB_UI.border}` }}
-                  >
-                    {SCENARIOS.map((s) => (
-                      <option key={s} value={s}>
-                        {s}
-                      </option>
-                    ))}
-                  </select>
-                  {scenario === "custom" && (
-                    <input
-                      placeholder="custom scenario name"
-                      value={customScenario}
-                      onChange={(e) => setCustomScenario(e.target.value)}
-                      disabled={recording}
-                      className="rounded-lg px-3 py-2.5 text-base"
-                      style={{ background: LAB_UI.surface, color: LAB_UI.text, border: `1px solid ${LAB_UI.border}` }}
-                    />
-                  )}
+                  <div>
+                    <div className="text-sm font-semibold">Choose a Free record protocol</div>
+                    <p className="mt-1 text-sm" style={{ color: LAB_UI.muted }}>
+                      These recordings do not use target-range coaching.
+                    </p>
+                  </div>
+                  <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+                    {([
+                      ["calibration", "Free record", "Uncoached calibration capture with manual event markers."],
+                      ["guided-10", "Guided 10-second hold", "Three regular breaths, then one timed 10-second hold."],
+                      ["guided-20", "Guided 20-second hold", "Three regular breaths, then one timed 20-second hold."],
+                    ] as const).map(([mode, title, detail]) => {
+                      const selected = freeProtocol === mode;
+                      return (
+                        <button
+                          key={mode}
+                          type="button"
+                          onClick={() => setFreeProtocol(mode)}
+                          disabled={recording}
+                          aria-pressed={selected}
+                          className="rounded-lg p-3 text-left disabled:opacity-50"
+                          style={{
+                            background: selected ? LAB_UI.accentSoft : LAB_UI.surface,
+                            border: `1px solid ${selected ? LAB_UI.accent : LAB_UI.border}`,
+                          }}
+                        >
+                          <span className="block text-sm font-semibold" style={{ color: selected ? LAB_UI.accent : LAB_UI.text }}>{title}</span>
+                          <span className="mt-1 block text-xs leading-relaxed" style={{ color: LAB_UI.muted }}>{detail}</span>
+                        </button>
+                      );
+                    })}
+                  </div>
+                  <div className="rounded-lg p-3 text-sm leading-relaxed" style={{ background: LAB_UI.subtle, color: LAB_UI.muted }}>
+                    {freeProtocol === "calibration"
+                      ? "Start and stop the trace manually. No audio or target corrections will play."
+                      : `The recording waits for three regular breaths, asks the patient to inhale and hold for ${freeProtocol === "guided-10" ? 10 : 20} seconds, announces five seconds remaining, and tells them when to release.`}
+                  </div>
                 </>
               ) : (
                 <>
@@ -2814,19 +2980,43 @@ export default function LabPage() {
                   onClick={() => {
                     if (freeMode === "position-study") {
                       startPositionStudy();
+                    } else if (freeProtocol === "calibration") {
+                      positionStudyRef.current = null;
+                      startRec("Free record — uncoached calibration");
                     } else {
                       positionStudyRef.current = null;
-                      startRec();
+                      void startFreeGuidedHold(freeProtocol === "guided-10" ? 10 : 20);
                     }
                   }}
                   className="rounded-lg py-3 font-semibold"
                   style={{ background: LAB_UI.accent, color: "white" }}
                 >
-                  {freeMode === "position-study" ? "Record this position" : "Start free recording"}
+                  {freeMode === "position-study"
+                    ? "Record this position"
+                    : freeProtocol === "calibration"
+                      ? "Start free record"
+                      : `Start guided ${freeProtocol === "guided-10" ? 10 : 20}-second hold`}
                 </button>
               ) : guidedActive ? (
-                <div className="rounded-lg py-2.5 text-center text-sm" style={{ background: LAB_UI.subtle, color: LAB_UI.muted }}>
-                  Guided run is recording above
+                <div className="flex flex-col gap-3">
+                  <div className="rounded-lg p-4 text-center" style={{ background: LAB_UI.accentSoft }}>
+                    <div className="text-lg font-semibold" style={{ color: guidedPhaseColor(guidedPhase) }}>{guidedPhase}</div>
+                    <div className="mt-1 text-sm" style={{ color: LAB_UI.muted }}>{guidedLabel}</div>
+                    <div className="mt-2 text-2xl font-mono tabular-nums">
+                      {guidedPhase === "REST"
+                        ? `${stepCountdown}/3 breaths`
+                        : stepCountdown > 0
+                          ? `${stepCountdown}s`
+                          : "…"}
+                    </div>
+                  </div>
+                  <button
+                    onClick={cancelGuided}
+                    className="rounded-lg py-2.5 text-sm font-medium"
+                    style={{ background: LAB_UI.surface, color: LAB_UI.danger, border: `1px solid ${LAB_UI.border}` }}
+                  >
+                    Stop and review recording
+                  </button>
                 </div>
               ) : (
                 <button
@@ -2851,7 +3041,18 @@ export default function LabPage() {
                   minimumHalfRangeDeg={0.15}
                 />
               )}
-              {recording && !guidedActive && freeMode === "standard" && (
+              {guidedActive && traceAnchorPitch != null && traceSessionStart != null && freeMode === "standard" && (
+                <ContinuousBreathingTrace
+                  pitch={pitch}
+                  anchorPitch={traceAnchorPitch}
+                  sessionStartedAt={traceSessionStart}
+                  active={recording}
+                  events={events}
+                  title="Guided breath-hold trace"
+                  description="three regular breaths • inhale and hold • timed release"
+                />
+              )}
+              {recording && !guidedActive && freeMode === "standard" && freeProtocol === "calibration" && (
                 <div className="grid grid-cols-2 gap-2 mt-1">
                   {FREE_EVENTS.map(([type, label]) => (
                     <button
@@ -3659,7 +3860,11 @@ function captureDeviceMetadata(): DeviceMetadata {
 
 function recordingFilename(rec: Recording) {
   const ts = rec.startedAt.replace(/[:.]/g, "-").replace(/T/, "_").slice(0, 19);
-  return `dibh-${rec.scenario}-${ts}.json`;
+  const scenario = rec.scenario
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "");
+  return `dibh-${scenario || "trace"}-${ts}.json`;
 }
 
 async function shareRecording(rec: Recording) {

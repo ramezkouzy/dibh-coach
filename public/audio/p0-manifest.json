@@ -1,6 +1,6 @@
 {
   "schema": "dibh-audio-manifest/v1",
-  "generatedAt": "2026-09-01T19:03:39.338Z",
+  "generatedAt": "2026-09-01T21:39:49.751Z",
   "provider": "OpenAI",
   "model": "gpt-4o-mini-tts",
   "voice": "coral",
@@ -39,6 +39,12 @@
       "sha256": "fcf011ab382a3a0a7c2d561f254fca4c9f173f891bfdaf6379f521f19367244b"
     },
     {
+      "filename": "p0_three_regular_breaths.mp3",
+      "text": "Breathe normally for three regular breaths.",
+      "bytes": 87980,
+      "sha256": "c7936c5250f59bc032d72027dfcf33524d5b5ed2c6a2a275d108d7e94e35fd52"
+    },
+    {
       "filename": "p0_ready.mp3",
       "text": "Get ready. Your deep breath is next.",
       "bytes": 70700,
@@ -49,6 +55,18 @@
       "text": "Take a deep breath in and hold it for ten seconds.",
       "bytes": 75308,
       "sha256": "1f041e23344ab5e76947a6088489e3933c38e2fba6c4204cb0b62310fc8d9671"
+    },
+    {
+      "filename": "p0_guided_hold_10.mp3",
+      "text": "Take a deep breath in, and hold for ten seconds.",
+      "bytes": 96812,
+      "sha256": "9da5c116d5474d9d0aa76550ea557740c4c27e4f7b04a3b2153094679e5b954f"
+    },
+    {
+      "filename": "p0_guided_hold_20.mp3",
+      "text": "Take a deep breath in, and hold for twenty seconds.",
+      "bytes": 102188,
+      "sha256": "487a4ff6f64538f8279cfc10af9020397649a806eebb739510c5ec9437e524c9"
     },
     {
       "filename": "p0_hold.mp3",
