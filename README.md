@@ -155,17 +155,21 @@ Deploy is wired through Vercel; the active production alias is
 
 ### Re-recording the coaching audio
 
-If you change any phrase in `src/audio.ts`, mirror it in
-`scripts/generate-tts.mjs` and `public/tts-generator.html`. Two paths:
+The DIBH Lab prompt manifest is in `scripts/generate-tts.mjs`. Add the OpenAI
+API key to the Git-ignored `.env.local` file, then generate a Coral preview set:
 
 ```bash
-# Server-side, with a real ElevenLabs API key:
-ELEVENLABS_API_KEY=sk_xxx pnpm tts:generate
+pnpm tts:generate
 
-# Client-side, no key, user-pays via Puter.js:
-# open https://dibh-coach.vercel.app/tts-generator.html in Chrome,
-# sign in to Puter, point at public/audio/, click Generate.
+# Regenerate one clip while tuning delivery:
+pnpm tts:generate -- --only p0_inhale
 ```
+
+The generator uses `gpt-4o-mini-tts`, the `coral` voice, MP3 output, and a
+slower clinical-coach delivery. It stages files in
+`public/audio/openai-coral-preview/`; review timing and clarity before replacing
+the active files in `public/audio/`. A `manifest.json` records the exact text,
+settings, sizes, and SHA-256 checksums. Never commit `.env.local` or an API key.
 
 ### Analyzing a lab recording
 

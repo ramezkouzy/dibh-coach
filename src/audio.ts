@@ -1,5 +1,5 @@
 // Coaching phrases. The app plays a fixed set, so we generate them once with
-// a TTS provider (ElevenLabs) and store the MP3s under public/audio/. At
+// OpenAI gpt-4o-mini-tts and store the MP3s under public/audio/. At
 // runtime we play a clip by key — zero latency, zero recurring cost. To
 // re-record (e.g., swap in Belisa's voice), regenerate the same files in
 // place; no app code changes.

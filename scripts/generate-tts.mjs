@@ -1,21 +1,24 @@
 #!/usr/bin/env node
-// Generate the coaching MP3s once via ElevenLabs.
-// Usage:
-//   ELEVENLABS_API_KEY=sk_xxx node scripts/generate-tts.mjs
-//   ELEVENLABS_API_KEY=sk_xxx ELEVEN_VOICE=Rachel node scripts/generate-tts.mjs
+// Generate the DIBH Lab coaching MP3s with OpenAI text-to-speech.
 //
-// Drops files into public/audio/<key>.mp3. Re-running overwrites.
+// 1. Put OPENAI_API_KEY in .env.local.
+// 2. Run: pnpm tts:generate
+//
+// New clips are staged in public/audio/openai-coral-preview/ so the working
+// production clips are not overwritten before they are reviewed.
 
+import { createHash } from "node:crypto";
 import fs from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const ROOT = path.resolve(__dirname, "..");
-const OUT_DIR = path.join(ROOT, "public", "audio");
+const ENV_FILE = path.join(ROOT, ".env.local");
+const AUDIO_DIR = path.join(ROOT, "public", "audio");
+const DEFAULT_OUT_DIR = path.join(AUDIO_DIR, "openai-coral-preview");
 
-// Mirror src/audio.ts. Kept inline so the script has no TS toolchain dep.
-const PHRASES = {
+const LAB_PHRASES = {
   p0_session_intro:
     "This is a hands-free breathing run. Listen for rest, deep breath in and hold, five seconds left, and release.",
   p0_rehearsal_intro: "First, one short rehearsal so you can learn the sequence.",
@@ -48,92 +51,180 @@ const PHRASES = {
   p0_practice_incomplete:
     "Practice stopped after repeated attempts. Review the trace before trying again.",
   p0_session_complete: "Practice complete. Great work.",
-  baseline_intro: "Breathe normally for twenty seconds.",
-  placement_countdown: "Place the phone on your belly. The session begins in five seconds.",
-  baseline_intro_12: "Breathe normally and relax while I learn your resting movement.",
-  prepare_anchor: "Take a normal breath in, breathe out, and relax.",
-  baseline_low_data: "Not enough data. Let's try again.",
-  baseline_no_breath: "I could not see your breathing. Place the phone on your belly and try again.",
-  baseline_too_much: "There was too much movement. Let's try again.",
-  baseline_odd_rate: "Your breathing looked unusual. Let's try once more.",
-  baseline_done: "Baseline captured.",
-  inhale_cue: "Take a deep breath in.",
-  locked_in: "Locked in. Hold steady.",
-  drifting: "Drifting. Hold steady.",
-  regained: "There you go. Keep holding.",
-  target_reached: "Target reached. Great hold.",
-  release_breath: "Release. Breathe normally.",
-  session_done: "Session complete. Great work.",
-  learn_intro: "Three comfortable holds. Find a depth you can hold steady.",
-  learn_got_one: "Good. Two more like that.",
-  learn_got_two: "One more comfortable hold.",
-  learn_target_locked: "Target locked. Let's match it.",
-  calibration_incomplete: "I could not learn a reliable target from those holds. Session complete.",
-  go_deeper: "A little deeper.",
-  ease_back: "Ease back a touch.",
-  right_there: "Right there. Hold steady.",
 };
 
-// Default voice IDs from ElevenLabs catalogue (calm female narrators).
-const VOICES = {
-  Rachel: "21m00Tcm4TlvDq8ikWAM",
-  Bella: "EXAVITQu4vr4xnSDxMaL",
-  Nicole: "piTKgcLEGmPE4e6mEKli",
-  Charlotte: "XB0fDUnXU5powFXDhCwa",
-  Sarah: "EXAVITQu4vr4xnSDxMaL",
-};
+const DEFAULT_INSTRUCTIONS = [
+  "Speak as a calm, reassuring clinical breathing coach.",
+  "Use a warm, clear, neutral American English delivery.",
+  "Speak deliberately and slightly slower than normal conversation.",
+  "Keep commands unambiguous, with a brief natural pause between clauses.",
+  "Do not add, remove, or paraphrase words.",
+  "Do not sound excited, theatrical, rushed, or conversational.",
+].join(" ");
 
-async function main() {
-  const apiKey = process.env.ELEVENLABS_API_KEY;
-  if (!apiKey) {
-    console.error("ELEVENLABS_API_KEY env var is required.");
-    process.exit(1);
+async function loadLocalEnv() {
+  let contents;
+  try {
+    contents = await fs.readFile(ENV_FILE, "utf8");
+  } catch (error) {
+    if (error?.code === "ENOENT") return;
+    throw error;
   }
-  const voiceName = process.env.ELEVEN_VOICE || "Rachel";
-  const voiceId = VOICES[voiceName] || voiceName; // allow raw voice ID
-  const modelId = process.env.ELEVEN_MODEL || "eleven_multilingual_v2";
 
-  await fs.mkdir(OUT_DIR, { recursive: true });
-
-  const entries = Object.entries(PHRASES);
-  console.log(`Generating ${entries.length} clips with ${voiceName} (${modelId})…`);
-  for (const [key, text] of entries) {
-    const outPath = path.join(OUT_DIR, `${key}.mp3`);
-    process.stdout.write(`  ${key}.mp3 … `);
-    const res = await fetch(
-      `https://api.elevenlabs.io/v1/text-to-speech/${voiceId}`,
-      {
-        method: "POST",
-        headers: {
-          "xi-api-key": apiKey,
-          "Content-Type": "application/json",
-          Accept: "audio/mpeg",
-        },
-        body: JSON.stringify({
-          text,
-          model_id: modelId,
-          voice_settings: {
-            stability: 0.65,
-            similarity_boost: 0.75,
-            style: 0.15,
-            use_speaker_boost: true,
-          },
-        }),
-      },
-    );
-    if (!res.ok) {
-      const err = await res.text();
-      console.error(`failed (${res.status}): ${err.slice(0, 200)}`);
-      process.exit(1);
+  for (const sourceLine of contents.split(/\r?\n/)) {
+    const line = sourceLine.trim();
+    if (!line || line.startsWith("#")) continue;
+    const match = line.match(/^(?:export\s+)?([A-Za-z_][A-Za-z0-9_]*)=(.*)$/);
+    if (!match) continue;
+    const [, key, rawValue] = match;
+    if (process.env[key]) continue;
+    let value = rawValue.trim();
+    if (
+      value.length >= 2 &&
+      ((value.startsWith('"') && value.endsWith('"')) ||
+        (value.startsWith("'") && value.endsWith("'")))
+    ) {
+      value = value.slice(1, -1);
     }
-    const buf = Buffer.from(await res.arrayBuffer());
-    await fs.writeFile(outPath, buf);
-    console.log(`${(buf.length / 1024).toFixed(1)} KB`);
+    process.env[key] = value;
   }
-  console.log(`Done → ${OUT_DIR}`);
 }
 
-main().catch((e) => {
-  console.error(e);
+function selectedEntries() {
+  const onlyIndex = process.argv.indexOf("--only");
+  if (onlyIndex === -1) return Object.entries(LAB_PHRASES);
+  const key = process.argv[onlyIndex + 1];
+  if (!key || !(key in LAB_PHRASES)) {
+    throw new Error(`Unknown --only key: ${key || "(missing)"}`);
+  }
+  return [[key, LAB_PHRASES[key]]];
+}
+
+async function generateClip({ apiKey, model, voice, instructions, speed, key, text, outDir }) {
+  const response = await fetch("https://api.openai.com/v1/audio/speech", {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${apiKey}`,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({
+      model,
+      voice,
+      input: text,
+      instructions,
+      response_format: "mp3",
+      speed,
+    }),
+  });
+
+  if (!response.ok) {
+    const detail = (await response.text()).slice(0, 800);
+    throw new Error(`${key} failed (${response.status}): ${detail}`);
+  }
+
+  const bytes = Buffer.from(await response.arrayBuffer());
+  if (bytes.length < 1_000) {
+    throw new Error(`${key} returned an unexpectedly small audio file (${bytes.length} bytes).`);
+  }
+
+  const outPath = path.join(outDir, `${key}.mp3`);
+  const temporaryPath = `${outPath}.partial`;
+  await fs.writeFile(temporaryPath, bytes);
+  await fs.rename(temporaryPath, outPath);
+
+  return {
+    filename: `${key}.mp3`,
+    text,
+    bytes: bytes.length,
+    sha256: createHash("sha256").update(bytes).digest("hex"),
+  };
+}
+
+async function main() {
+  await loadLocalEnv();
+
+  const apiKey = process.env.OPENAI_API_KEY?.trim();
+  if (!apiKey) {
+    console.error(`Add OPENAI_API_KEY to ${ENV_FILE}, then run pnpm tts:generate again.`);
+    process.exit(1);
+  }
+
+  const model = process.env.OPENAI_TTS_MODEL?.trim() || "gpt-4o-mini-tts";
+  const voice = process.env.OPENAI_TTS_VOICE?.trim() || "coral";
+  const speed = Number(process.env.OPENAI_TTS_SPEED || "0.92");
+  const instructions = process.env.OPENAI_TTS_INSTRUCTIONS?.trim() || DEFAULT_INSTRUCTIONS;
+  const outDir = process.env.OPENAI_TTS_OUT_DIR
+    ? path.resolve(ROOT, process.env.OPENAI_TTS_OUT_DIR)
+    : DEFAULT_OUT_DIR;
+
+  if (!Number.isFinite(speed) || speed < 0.25 || speed > 4) {
+    throw new Error("OPENAI_TTS_SPEED must be between 0.25 and 4.");
+  }
+
+  const entries = selectedEntries();
+  await fs.mkdir(outDir, { recursive: true });
+
+  console.log(`Generating ${entries.length} DIBH Lab clip${entries.length === 1 ? "" : "s"}.`);
+  console.log(`Model: ${model} | voice: ${voice} | speed: ${speed}`);
+  console.log(`Preview output: ${outDir}`);
+
+  const files = [];
+  for (const [key, text] of entries) {
+    process.stdout.write(`  ${key}.mp3 … `);
+    const file = await generateClip({
+      apiKey,
+      model,
+      voice,
+      instructions,
+      speed,
+      key,
+      text,
+      outDir,
+    });
+    files.push(file);
+    console.log(`${(file.bytes / 1_000).toFixed(1)} KB`);
+  }
+
+  if (entries.length > 1) {
+    const toneSource = path.join(AUDIO_DIR, "p0_in_range_ding.mp3");
+    const toneDestination = path.join(outDir, "p0_in_range_ding.mp3");
+    try {
+      await fs.copyFile(toneSource, toneDestination);
+      const tone = await fs.readFile(toneDestination);
+      files.push({
+        filename: "p0_in_range_ding.mp3",
+        text: null,
+        bytes: tone.length,
+        sha256: createHash("sha256").update(tone).digest("hex"),
+        source: "existing non-speech target-range tone",
+      });
+    } catch (error) {
+      if (error?.code !== "ENOENT") throw error;
+      console.warn("Target-range tone was not copied because the existing file was not found.");
+    }
+  }
+
+  const manifest = {
+    schema: "dibh-audio-manifest/v1",
+    generatedAt: new Date().toISOString(),
+    provider: "OpenAI",
+    model,
+    voice,
+    responseFormat: "mp3",
+    speed,
+    instructions,
+    files,
+  };
+  await fs.writeFile(
+    path.join(outDir, "manifest.json"),
+    `${JSON.stringify(manifest, null, 2)}\n`,
+  );
+
+  console.log(`Done. Review the preview files in ${outDir}`);
+  console.log("The current production audio has not been overwritten.");
+}
+
+main().catch((error) => {
+  console.error(error instanceof Error ? error.message : error);
   process.exit(1);
 });
