@@ -1,5 +1,6 @@
 "use client";
 
+import Image from "next/image";
 import { useEffect, useRef, useState, useCallback } from "react";
 import { playClip, stopAudio, unlockAudio } from "@/audio";
 import { analyzeLabRecording, LAB_P0_ALGORITHM } from "@/lib/lab-p0-analysis.mjs";
@@ -216,7 +217,7 @@ type Recording = {
     targetAcquisitionSeconds: number | null;
     recoverySeconds: number | null;
     handsFree: boolean;
-    phonePlacement: "charging_port_toward_face" | null;
+    phonePlacement: "bottom_at_xiphoid_top_toward_head_screen_up" | null;
     targetMethod: "local_three_peak_delta_mean_combined_sd" | "median_relative_excursion" | null;
   };
   contributor: ContributorMetadata;
@@ -708,7 +709,7 @@ export default function LabPage() {
         targetAcquisitionSeconds: null,
         recoverySeconds: null,
         handsFree: Boolean(guidedConfig),
-        phonePlacement: guidedConfig ? "charging_port_toward_face" as const : null,
+        phonePlacement: guidedConfig ? "bottom_at_xiphoid_top_toward_head_screen_up" as const : null,
         targetMethod: guidedConfig?.calibrationHoldCount
           ? "local_three_peak_delta_mean_combined_sd" as const
           : null,
@@ -1856,7 +1857,7 @@ export default function LabPage() {
       enterGuidedStage("setup");
       enterGuidedPhase(
         "setup",
-        "SETUP • Phone flat on belly, charging port toward the face",
+        "SETUP • Phone flat, bottom edge at the xiphoid, screen up",
       );
       const introResult = await coach("p0_session_intro", { phase: "setup" });
       if (introResult !== "ended") {
@@ -1864,7 +1865,7 @@ export default function LabPage() {
         setGuidedLabel("AUDIO UNAVAILABLE • Tap Test voice, then restart");
         return;
       }
-      await waitGuidedSeconds(3, "SETUP • Place phone flat on your belly");
+      await waitGuidedSeconds(3, "SETUP • Point the top of the phone toward your head");
 
       enterGuidedStage("rehearsal");
       enterGuidedPhase("rehearsal", "REHEARSAL • Learn the four cues");
@@ -2299,11 +2300,44 @@ export default function LabPage() {
     }
   };
 
-  const startAnotherRecording = () => {
+  const resetCompletedTrace = () => {
+    stopAudio();
+    guidedRunningRef.current = false;
+    recordingRef.current = false;
+    samplesRef.current = [];
+    eventsRef.current = [];
+    guidedConfigRef.current = null;
+    positionStudyRef.current = null;
+    learnedTargetRef.current = null;
+    setRecording(false);
+    setDuration(0);
+    setCount(0);
+    setEvents([]);
+    setGuidedActive(false);
+    setGuidedStage("idle");
+    setGuidedPhase("IDLE");
+    setGuidedLabel("");
+    setStepCountdown(0);
+    setLiveGate(null);
+    setTraceAnchorPitch(null);
+    setTraceSessionStart(null);
+    setPositionTraceAnchorPitch(null);
+    setPositionTraceSessionStart(null);
+    setLast(null);
     setImported(null);
     setNote("");
-    setRunLabel("");
     setSubmissionState({ status: "idle" });
+  };
+
+  const retryCompletedTrace = () => {
+    resetCompletedTrace();
+    setLabView("run");
+  };
+
+  const discardCompletedTrace = () => {
+    if (!window.confirm("Discard this trace? Any submitted copy will remain in the study collection.")) return;
+    resetCompletedTrace();
+    setRunLabel("");
     setLabView("home");
   };
 
@@ -2348,20 +2382,36 @@ export default function LabPage() {
 
         {labView === "home" && (
           <>
-            <details className="group rounded-lg px-4 py-3" style={{ background: LAB_UI.accentSoft }}>
-              <summary className="cursor-pointer text-sm font-semibold" style={{ color: LAB_UI.accent }}>
-                How to record and submit
-              </summary>
-              <ol className="mt-3 grid gap-2 text-sm leading-relaxed sm:grid-cols-3" style={{ color: LAB_UI.muted }}>
-                <li><strong style={{ color: LAB_UI.text }}>1. Identify.</strong> Select the participant code.</li>
-                <li><strong style={{ color: LAB_UI.text }}>2. Record.</strong> Choose a protocol and follow the placement instructions.</li>
-                <li><strong style={{ color: LAB_UI.text }}>3. Submit.</strong> Review the trace, add notes, and send the file.</li>
-              </ol>
-            </details>
+            <section className="rounded-xl p-5" style={{ background: LAB_UI.surface, border: `1px solid ${LAB_UI.border}` }}>
+              <h2 className="text-lg font-semibold">Record and submit</h2>
+              <p className="mt-1 text-sm" style={{ color: LAB_UI.muted }}>
+                Follow these steps for every recording.
+              </p>
+              <div className="mt-4 grid gap-5 md:grid-cols-[minmax(220px,300px)_1fr] md:items-start">
+                <Image
+                  src="/images/phone-position-guide.jpg"
+                  alt="Illustration showing a phone positioned flat over the lower sternum and xiphoid process for breathing measurement"
+                  width={768}
+                  height={1376}
+                  priority
+                  className="w-full max-w-[300px] rounded-lg justify-self-center"
+                  style={{ border: `1px solid ${LAB_UI.border}` }}
+                />
+                <ol className="space-y-4 text-sm leading-relaxed" style={{ color: LAB_UI.muted }}>
+                  <li><strong style={{ color: LAB_UI.text }}>1. Enter the recording information.</strong> Select the participant code and acknowledge the data notice.</li>
+                  <li><strong style={{ color: LAB_UI.text }}>2. Choose a recording.</strong> Select Guided session or Free recording to continue.</li>
+                  <li>
+                    <strong style={{ color: LAB_UI.text }}>3. Position the phone.</strong> Place the bottom edge of the phone at the lower end of the breastbone, near the xiphoid process. The top of the phone should point toward the patient&apos;s head, with the screen facing up.
+                  </li>
+                  <li><strong style={{ color: LAB_UI.text }}>4. Record the trace.</strong> Keep the phone flat and still until the recording is complete.</li>
+                  <li><strong style={{ color: LAB_UI.text }}>5. Complete the trace.</strong> At the end, choose Submit, Retry, or Discard.</li>
+                </ol>
+              </div>
+            </section>
 
             <section className="rounded-xl p-5 flex flex-col gap-4" style={{ background: LAB_UI.surface, border: `1px solid ${LAB_UI.border}` }}>
               <div>
-                <h2 className="text-lg font-semibold">Recording information</h2>
+                <h2 className="text-lg font-semibold">1. Recording information</h2>
                 <p className="mt-1 text-sm" style={{ color: LAB_UI.muted }}>Used for each trace recorded during this visit.</p>
               </div>
               <label className="text-sm font-medium flex flex-col gap-1.5">
@@ -2455,18 +2505,17 @@ export default function LabPage() {
             <section className="rounded-xl p-5 flex flex-col gap-4" style={{ background: LAB_UI.surface, border: `1px solid ${LAB_UI.border}` }}>
               <div className="flex items-start justify-between gap-3">
                 <div>
-                  <h2 className="text-lg font-semibold">Choose a recording</h2>
-                  <p className="mt-1 text-sm" style={{ color: LAB_UI.muted }}>Motion access is requested after selection.</p>
+                  <h2 className="text-lg font-semibold">2. Choose a recording to continue</h2>
+                  <p className="mt-1 text-sm" style={{ color: LAB_UI.muted }}>After completing the information above, select one option below. Motion access is requested next.</p>
                 </div>
                 <span className="text-xs whitespace-nowrap" style={{ color: centralCollection === "ready" ? LAB_UI.success : LAB_UI.warning }}>
                   {centralCollection === "checking" ? "Checking upload" : centralCollection === "ready" ? "Upload ready" : "Download only"}
                 </span>
               </div>
-              <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
                 {([
-                  ["guided", "Guided session", "Calibrate, then complete coached breath holds."],
-                  ["position-study", "Position study", "Compare breathing signal at several body locations."],
-                  ["free", "Free recording", "Record an open trace with manual event markers."],
+                  ["guided", "Continue to guided session", "Calibrate, then complete coached breath holds."],
+                  ["free", "Continue to free recording", "Record an open trace with manual event markers."],
                 ] as const).map(([mode, title, detail]) => (
                   <button
                     key={mode}
@@ -2561,7 +2610,7 @@ export default function LabPage() {
                 </button>
               </div>
               <div className="text-sm leading-relaxed" style={{ color: LAB_UI.muted }}>
-                Place the phone flat on the abdomen, with the charging port toward the patient&apos;s face.
+                Place the phone flat with its bottom edge at the xiphoid process. Point the top of the phone toward the patient&apos;s head, with the screen facing up.
               </div>
               {!guidedActive ? (
                 <button
@@ -2741,7 +2790,7 @@ export default function LabPage() {
                     </label>
                   </div>
                   <div className="text-sm leading-relaxed" style={{ color: LAB_UI.muted }}>
-                    Phone: flat on the body, charging port toward the patient&apos;s face.
+                    Phone: bottom edge at the xiphoid process, top pointed toward the patient&apos;s head, screen facing up.
                   </div>
                 </>
               )}
@@ -2854,33 +2903,60 @@ export default function LabPage() {
               )}
 
               {last && !imported && (
-                <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
-                  <button
-                    onClick={() => void submitLastRecording()}
-                    disabled={centralCollection !== "ready" || submissionState.status === "submitting" || submissionState.status === "success"}
-                    className="rounded-lg py-3 text-sm font-semibold disabled:opacity-35"
-                    style={{ background: LAB_UI.accent, color: "white" }}
-                  >
-                    {submissionState.status === "submitting"
-                      ? "Submitting…"
-                      : submissionState.status === "success"
-                        ? "Submitted"
-                        : "Submit trace"}
-                  </button>
-                  <button
-                    onClick={() => download({ ...last, note })}
-                    className="rounded-lg py-3 text-sm font-semibold"
-                    style={{ background: LAB_UI.surface, color: LAB_UI.accent, border: `1px solid ${LAB_UI.accent}` }}
-                  >
-                    Download JSON
-                  </button>
-                  <button
-                    onClick={() => void shareRecording({ ...last, note })}
-                    className="rounded-lg py-3 text-sm font-semibold"
-                    style={{ background: LAB_UI.subtle, color: LAB_UI.text, border: `1px solid ${LAB_UI.border}` }}
-                  >
-                    Share / email JSON
-                  </button>
+                <div className="flex flex-col gap-3">
+                  <div>
+                    <h3 className="text-base font-semibold">Choose what to do with this trace</h3>
+                    <p className="mt-1 text-sm" style={{ color: LAB_UI.muted }}>
+                      Submit it to the study collection, retry the same recording, or discard this browser&apos;s copy.
+                    </p>
+                  </div>
+                  <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+                    <button
+                      onClick={() => void submitLastRecording()}
+                      disabled={centralCollection !== "ready" || submissionState.status === "submitting" || submissionState.status === "success"}
+                      className="rounded-lg py-3 text-sm font-semibold disabled:opacity-35"
+                      style={{ background: LAB_UI.accent, color: "white" }}
+                    >
+                      {submissionState.status === "submitting"
+                        ? "Submitting…"
+                        : submissionState.status === "success"
+                          ? "Submitted"
+                          : "Submit trace"}
+                    </button>
+                    <button
+                      onClick={retryCompletedTrace}
+                      className="rounded-lg py-3 text-sm font-semibold"
+                      style={{ background: LAB_UI.surface, color: LAB_UI.accent, border: `1px solid ${LAB_UI.accent}` }}
+                    >
+                      Retry trace
+                    </button>
+                    <button
+                      onClick={discardCompletedTrace}
+                      className="rounded-lg py-3 text-sm font-semibold"
+                      style={{ background: LAB_UI.surface, color: LAB_UI.danger, border: `1px solid ${LAB_UI.border}` }}
+                    >
+                      Discard trace
+                    </button>
+                  </div>
+                  <details className="rounded-lg px-3 py-2.5 text-sm" style={{ background: LAB_UI.subtle, color: LAB_UI.muted }}>
+                    <summary className="cursor-pointer font-medium" style={{ color: LAB_UI.text }}>Download or share a copy</summary>
+                    <div className="mt-3 grid grid-cols-1 sm:grid-cols-2 gap-3">
+                      <button
+                        onClick={() => download({ ...last, note })}
+                        className="rounded-lg py-2.5 text-sm font-semibold"
+                        style={{ background: LAB_UI.surface, color: LAB_UI.accent, border: `1px solid ${LAB_UI.accent}` }}
+                      >
+                        Download JSON
+                      </button>
+                      <button
+                        onClick={() => void shareRecording({ ...last, note })}
+                        className="rounded-lg py-2.5 text-sm font-semibold"
+                        style={{ background: LAB_UI.surface, color: LAB_UI.text, border: `1px solid ${LAB_UI.border}` }}
+                      >
+                        Share / email JSON
+                      </button>
+                    </div>
+                  </details>
                 </div>
               )}
 
@@ -2899,10 +2975,6 @@ export default function LabPage() {
                   {submissionState.message} Download the JSON backup before leaving this page.
                 </div>
               )}
-
-              <button onClick={startAnotherRecording} className="self-start text-sm font-medium" style={{ color: LAB_UI.accent }}>
-                Record another trace
-              </button>
             </section>
 
             {positionRuns.length > 0 && displayedRecording.positionStudy && last && !imported && (
