@@ -20,6 +20,7 @@
 
 # production
 /build
+/public/audio/openai-coral-preview/
 
 # misc
 .DS_Store

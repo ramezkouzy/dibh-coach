@@ -163,10 +163,14 @@ pnpm tts:generate
 
 # Regenerate one clip while tuning delivery:
 pnpm tts:generate -- --only p0_inhale
+
+# Rebuild only the non-speech target-range chime:
+pnpm tts:generate -- --tone-only
 ```
 
 The generator uses `gpt-4o-mini-tts`, the `coral` voice, MP3 output, and a
-slower clinical-coach delivery. It stages files in
+slower clinical-coach delivery. It normalizes speech loudness and creates the
+two-tone in-range chime locally with `ffmpeg`. It stages files in
 `public/audio/openai-coral-preview/`; review timing and clarity before replacing
 the active files in `public/audio/`. A `manifest.json` records the exact text,
 settings, sizes, and SHA-256 checksums. Never commit `.env.local` or an API key.

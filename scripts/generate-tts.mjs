@@ -8,8 +8,10 @@
 // production clips are not overwritten before they are reviewed.
 
 import { createHash } from "node:crypto";
+import { execFile } from "node:child_process";
 import fs from "node:fs/promises";
 import path from "node:path";
+import { promisify } from "node:util";
 import { fileURLToPath } from "node:url";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -17,6 +19,7 @@ const ROOT = path.resolve(__dirname, "..");
 const ENV_FILE = path.join(ROOT, ".env.local");
 const AUDIO_DIR = path.join(ROOT, "public", "audio");
 const DEFAULT_OUT_DIR = path.join(AUDIO_DIR, "openai-coral-preview");
+const execFileAsync = promisify(execFile);
 
 const LAB_PHRASES = {
   p0_session_intro:
@@ -27,7 +30,7 @@ const LAB_PHRASES = {
   p0_practice_intro:
     "Calibration complete. Coaching begins. Breathe normally for three breaths, then take a deep breath in and hold for ten seconds. I will coach you toward the target range.",
   p0_rest: "Rest and breathe normally.",
-  p0_ready: "Keep breathing normally. In five seconds, take a deep breath in and hold.",
+  p0_ready: "Get ready. Your deep breath is next.",
   p0_inhale: "Take a deep breath in and hold it for ten seconds.",
   p0_hold: "Hold now.",
   p0_hold_8: "Eight-second hold starts now.",
@@ -122,33 +125,120 @@ async function generateClip({ apiKey, model, voice, instructions, speed, key, te
     throw new Error(`${key} failed (${response.status}): ${detail}`);
   }
 
-  const bytes = Buffer.from(await response.arrayBuffer());
-  if (bytes.length < 1_000) {
-    throw new Error(`${key} returned an unexpectedly small audio file (${bytes.length} bytes).`);
+  const sourceBytes = Buffer.from(await response.arrayBuffer());
+  if (sourceBytes.length < 1_000) {
+    throw new Error(`${key} returned an unexpectedly small audio file (${sourceBytes.length} bytes).`);
   }
 
   const outPath = path.join(outDir, `${key}.mp3`);
-  const temporaryPath = `${outPath}.partial`;
-  await fs.writeFile(temporaryPath, bytes);
-  await fs.rename(temporaryPath, outPath);
+  const sourcePath = `${outPath}.source.mp3`;
+  await fs.writeFile(sourcePath, sourceBytes);
+  await normalizeMp3(sourcePath, outPath);
+  await fs.rm(sourcePath, { force: true });
 
-  return {
-    filename: `${key}.mp3`,
-    text,
-    bytes: bytes.length,
-    sha256: createHash("sha256").update(bytes).digest("hex"),
-  };
+  return fs.stat(outPath);
+}
+
+async function normalizeMp3(sourcePath, outPath) {
+  const normalizedPath = `${outPath}.normalized.mp3`;
+  try {
+    await execFileAsync("ffmpeg", [
+      "-y",
+      "-hide_banner",
+      "-loglevel",
+      "error",
+      "-i",
+      sourcePath,
+      "-af",
+      "loudnorm=I=-16:LRA=7:TP=-1.5",
+      "-ar",
+      "24000",
+      "-ac",
+      "1",
+      "-codec:a",
+      "libmp3lame",
+      "-b:a",
+      "128k",
+      normalizedPath,
+    ]);
+    await fs.rename(normalizedPath, outPath);
+  } catch (error) {
+    await fs.rm(normalizedPath, { force: true });
+    if (error?.code === "ENOENT") {
+      throw new Error("ffmpeg is required to normalize the generated phone audio.");
+    }
+    throw error;
+  }
+}
+
+async function generateTargetTone(outDir) {
+  const outPath = path.join(outDir, "p0_in_range_ding.mp3");
+  const temporaryPath = `${outPath}.generated.mp3`;
+  await execFileAsync("ffmpeg", [
+    "-y",
+    "-hide_banner",
+    "-loglevel",
+    "error",
+    "-f",
+    "lavfi",
+    "-i",
+    "sine=frequency=880:duration=0.20:sample_rate=24000",
+    "-f",
+    "lavfi",
+    "-i",
+    "sine=frequency=1175:duration=0.30:sample_rate=24000",
+    "-filter_complex",
+    "[0:a]volume=3.25,afade=t=out:st=0.11:d=0.09[first];[1:a]adelay=160,volume=2.75,afade=t=out:st=0.34:d=0.12[second];[first][second]amix=inputs=2:duration=longest:normalize=0,alimiter=limit=0.5:attack=5:release=50:level=false",
+    "-ar",
+    "24000",
+    "-ac",
+    "1",
+    "-codec:a",
+    "libmp3lame",
+    "-b:a",
+    "128k",
+    temporaryPath,
+  ]);
+  await fs.rename(temporaryPath, outPath);
+}
+
+async function buildManifestFiles(outDir) {
+  const files = [];
+  for (const [key, text] of Object.entries(LAB_PHRASES)) {
+    const filename = `${key}.mp3`;
+    const bytes = await fs.readFile(path.join(outDir, filename));
+    files.push({
+      filename,
+      text,
+      bytes: bytes.length,
+      sha256: createHash("sha256").update(bytes).digest("hex"),
+    });
+  }
+  const tone = await fs.readFile(path.join(outDir, "p0_in_range_ding.mp3"));
+  files.push({
+    filename: "p0_in_range_ding.mp3",
+    text: null,
+    bytes: tone.length,
+    sha256: createHash("sha256").update(tone).digest("hex"),
+    source: "generated two-tone target-range chime",
+  });
+  return files;
+}
+
+async function normalizeExistingPreview(outDir) {
+  for (const key of Object.keys(LAB_PHRASES)) {
+    const outPath = path.join(outDir, `${key}.mp3`);
+    process.stdout.write(`  normalize ${key}.mp3 … `);
+    await normalizeMp3(outPath, outPath);
+    console.log("done");
+  }
+  await generateTargetTone(outDir);
 }
 
 async function main() {
   await loadLocalEnv();
 
   const apiKey = process.env.OPENAI_API_KEY?.trim();
-  if (!apiKey) {
-    console.error(`Add OPENAI_API_KEY to ${ENV_FILE}, then run pnpm tts:generate again.`);
-    process.exit(1);
-  }
-
   const model = process.env.OPENAI_TTS_MODEL?.trim() || "gpt-4o-mini-tts";
   const voice = process.env.OPENAI_TTS_VOICE?.trim() || "coral";
   const speed = Number(process.env.OPENAI_TTS_SPEED || "0.92");
@@ -161,49 +251,43 @@ async function main() {
     throw new Error("OPENAI_TTS_SPEED must be between 0.25 and 4.");
   }
 
-  const entries = selectedEntries();
   await fs.mkdir(outDir, { recursive: true });
 
-  console.log(`Generating ${entries.length} DIBH Lab clip${entries.length === 1 ? "" : "s"}.`);
-  console.log(`Model: ${model} | voice: ${voice} | speed: ${speed}`);
-  console.log(`Preview output: ${outDir}`);
-
-  const files = [];
-  for (const [key, text] of entries) {
-    process.stdout.write(`  ${key}.mp3 … `);
-    const file = await generateClip({
-      apiKey,
-      model,
-      voice,
-      instructions,
-      speed,
-      key,
-      text,
-      outDir,
-    });
-    files.push(file);
-    console.log(`${(file.bytes / 1_000).toFixed(1)} KB`);
-  }
-
-  if (entries.length > 1) {
-    const toneSource = path.join(AUDIO_DIR, "p0_in_range_ding.mp3");
-    const toneDestination = path.join(outDir, "p0_in_range_ding.mp3");
-    try {
-      await fs.copyFile(toneSource, toneDestination);
-      const tone = await fs.readFile(toneDestination);
-      files.push({
-        filename: "p0_in_range_ding.mp3",
-        text: null,
-        bytes: tone.length,
-        sha256: createHash("sha256").update(tone).digest("hex"),
-        source: "existing non-speech target-range tone",
-      });
-    } catch (error) {
-      if (error?.code !== "ENOENT") throw error;
-      console.warn("Target-range tone was not copied because the existing file was not found.");
+  if (process.argv.includes("--normalize-preview")) {
+    console.log(`Normalizing the existing Coral preview in ${outDir}`);
+    await normalizeExistingPreview(outDir);
+  } else if (process.argv.includes("--tone-only")) {
+    console.log(`Generating the target-range chime in ${outDir}`);
+    await generateTargetTone(outDir);
+  } else {
+    if (!apiKey) {
+      console.error(`Add OPENAI_API_KEY to ${ENV_FILE}, then run pnpm tts:generate again.`);
+      process.exit(1);
     }
+
+    const entries = selectedEntries();
+    console.log(`Generating ${entries.length} DIBH Lab clip${entries.length === 1 ? "" : "s"}.`);
+    console.log(`Model: ${model} | voice: ${voice} | speed: ${speed}`);
+    console.log(`Preview output: ${outDir}`);
+
+    for (const [key, text] of entries) {
+      process.stdout.write(`  ${key}.mp3 … `);
+      const file = await generateClip({
+        apiKey,
+        model,
+        voice,
+        instructions,
+        speed,
+        key,
+        text,
+        outDir,
+      });
+      console.log(`${(file.size / 1_000).toFixed(1)} KB normalized`);
+    }
+    await generateTargetTone(outDir);
   }
 
+  const files = await buildManifestFiles(outDir);
   const manifest = {
     schema: "dibh-audio-manifest/v1",
     generatedAt: new Date().toISOString(),

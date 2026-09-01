@@ -2527,6 +2527,7 @@ export default function LabPage() {
                       ? "Turn up media volume, then tap Test voice again."
                       : "You should hear the complete deep-breath instruction."}
                   </div>
+                  <div className="opacity-45">Voice prompts are AI-generated with OpenAI Coral.</div>
                 </div>
                 <button
                   onClick={testVoice}

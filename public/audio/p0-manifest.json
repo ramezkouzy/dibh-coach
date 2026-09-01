@@ -1,0 +1,163 @@
+{
+  "schema": "dibh-audio-manifest/v1",
+  "generatedAt": "2026-09-01T19:03:39.338Z",
+  "provider": "OpenAI",
+  "model": "gpt-4o-mini-tts",
+  "voice": "coral",
+  "responseFormat": "mp3",
+  "speed": 0.92,
+  "instructions": "Speak as a calm, reassuring clinical breathing coach. Use a warm, clear, neutral American English delivery. Speak deliberately and slightly slower than normal conversation. Keep commands unambiguous, with a brief natural pause between clauses. Do not add, remove, or paraphrase words. Do not sound excited, theatrical, rushed, or conversational.",
+  "files": [
+    {
+      "filename": "p0_session_intro.mp3",
+      "text": "This is a hands-free breathing run. Listen for rest, deep breath in and hold, five seconds left, and release.",
+      "bytes": 149036,
+      "sha256": "f0b048a1c51b52cb5c3f67d3fff29c59be6e48b108167a772d8bd0ca0c3cc55b"
+    },
+    {
+      "filename": "p0_rehearsal_intro.mp3",
+      "text": "First, one short rehearsal so you can learn the sequence.",
+      "bytes": 101420,
+      "sha256": "33acb347c2bf51c2da9339a10fef1e9129d3b6dea1761045b76d992da44d9b81"
+    },
+    {
+      "filename": "p0_calibration_intro.mp3",
+      "text": "Calibration begins. Breathe normally. After three regular breaths, take a deep breath in and hold for ten seconds. We will repeat this three times.",
+      "bytes": 238508,
+      "sha256": "d2f6134cdd115a6f21bc1945127188065c2ddd79bae59ac4727a365f7ea9fdd4"
+    },
+    {
+      "filename": "p0_practice_intro.mp3",
+      "text": "Calibration complete. Coaching begins. Breathe normally for three breaths, then take a deep breath in and hold for ten seconds. I will coach you toward the target range.",
+      "bytes": 217772,
+      "sha256": "b3efafc0a885aba6b6eed158bf776f40db41312247e5aad0179651f198e74089"
+    },
+    {
+      "filename": "p0_rest.mp3",
+      "text": "Rest and breathe normally.",
+      "bytes": 67244,
+      "sha256": "fcf011ab382a3a0a7c2d561f254fca4c9f173f891bfdaf6379f521f19367244b"
+    },
+    {
+      "filename": "p0_ready.mp3",
+      "text": "Get ready. Your deep breath is next.",
+      "bytes": 70700,
+      "sha256": "b901366d33b8e4e9e6b06e9a00d8bf7f865dffc7328fbba9f86e705b7bf0a04c"
+    },
+    {
+      "filename": "p0_inhale.mp3",
+      "text": "Take a deep breath in and hold it for ten seconds.",
+      "bytes": 75308,
+      "sha256": "1f041e23344ab5e76947a6088489e3933c38e2fba6c4204cb0b62310fc8d9671"
+    },
+    {
+      "filename": "p0_hold.mp3",
+      "text": "Hold now.",
+      "bytes": 30764,
+      "sha256": "d06a4957d5f25a58bb16fca39725bf41800db7e21a256d31cab64e53863675c3"
+    },
+    {
+      "filename": "p0_hold_8.mp3",
+      "text": "Eight-second hold starts now.",
+      "bytes": 60332,
+      "sha256": "ae57c63cd8a6735b8ed8aeabe48d9b27b72ba78afb07cab2c30ea96d6beb2017"
+    },
+    {
+      "filename": "p0_hold_10.mp3",
+      "text": "Ten-second hold starts now.",
+      "bytes": 60332,
+      "sha256": "4ce403d64551d20b124d9e07659b2bf083967b3451de13d62bc821616888bd3b"
+    },
+    {
+      "filename": "p0_hold_12.mp3",
+      "text": "Twelve-second hold starts now.",
+      "bytes": 73388,
+      "sha256": "9fa4ede6acc82739f4940d914bdb0bb1fcddfa50cc2f423fab93f3fa131cb7bc"
+    },
+    {
+      "filename": "p0_hold_15.mp3",
+      "text": "Fifteen-second hold starts now.",
+      "bytes": 76076,
+      "sha256": "91856cae8164f02c0bed2da3ec5e98b4c977c531bd724b3b684f7df87b3b8b55"
+    },
+    {
+      "filename": "p0_hold_20.mp3",
+      "text": "Twenty-second hold starts now.",
+      "bytes": 70700,
+      "sha256": "32bdaa4dfcecf5e56072019f89264664d2d7c2c821f4edc799383f52e136e4c0"
+    },
+    {
+      "filename": "p0_five_seconds_left.mp3",
+      "text": "Five seconds left.",
+      "bytes": 57644,
+      "sha256": "a24770787ac926dce7d020e65dc4da4a58ae9de0d2690eeca707d196af8218cb"
+    },
+    {
+      "filename": "p0_release.mp3",
+      "text": "Release and breathe normally.",
+      "bytes": 66476,
+      "sha256": "987368f210c301f71177dc0059d186844af491b920c338b4df3eac94871d6456"
+    },
+    {
+      "filename": "p0_abort.mp3",
+      "text": "Outside the target range. Release and breathe normally. After three regular breaths, we will try again.",
+      "bytes": 164780,
+      "sha256": "b0f0bd636b95a5ad868ba60a43ebd93f7045e2185a5ae8613544afb4890bcaa4"
+    },
+    {
+      "filename": "p0_deeper.mp3",
+      "text": "Breathe in a little more.",
+      "bytes": 42284,
+      "sha256": "bc585a5f74c79b31f55f110a3f100e2cc54857bb4f4248320c3553358cb39c81"
+    },
+    {
+      "filename": "p0_ease_back.mp3",
+      "text": "Ease back slightly.",
+      "bytes": 48044,
+      "sha256": "6a0896a83e18898ff04f8ff3b1ac799cefad20de8dd1e0ba276079b9bccc2940"
+    },
+    {
+      "filename": "p0_target.mp3",
+      "text": "Right there.",
+      "bytes": 34220,
+      "sha256": "f5c70926dca13e10dc9bac2ddfacd6f41d4b9324adc169f524ab18bd4c0445f2"
+    },
+    {
+      "filename": "p0_calibration_retry.mp3",
+      "text": "Release and breathe normally. I could not detect a held breath. After three regular breaths, we will try again.",
+      "bytes": 175148,
+      "sha256": "c520ad95f5a2acc98363c8555278d3937c42baf1ed9e2c73e73e9df2384e0d9e"
+    },
+    {
+      "filename": "p0_calibration_mismatch.mp3",
+      "text": "That hold did not match the others closely enough. We will collect another.",
+      "bytes": 117548,
+      "sha256": "9a6bbd09d3f137975088a4b837fa8735d32baecd5d8884fab0b0c331a556cadd"
+    },
+    {
+      "filename": "p0_calibration_failed.mp3",
+      "text": "Calibration needs another run. Keep the phone still and follow inhale, hold, and release.",
+      "bytes": 137516,
+      "sha256": "7b2923b4b05324030879b37c9415f303762f4c9172b7f292768ce020821b9dcd"
+    },
+    {
+      "filename": "p0_practice_incomplete.mp3",
+      "text": "Practice stopped after repeated attempts. Review the trace before trying again.",
+      "bytes": 130604,
+      "sha256": "adab3b27943d50027d93cc472deffa5736ab8fba95245e1fceec9f83ee173209"
+    },
+    {
+      "filename": "p0_session_complete.mp3",
+      "text": "Practice complete. Great work.",
+      "bytes": 53036,
+      "sha256": "56ae72cfd975bce0e5ca84be8f89d770126d04138ba93402a86eec1194a52bcb"
+    },
+    {
+      "filename": "p0_in_range_ding.mp3",
+      "text": null,
+      "bytes": 8876,
+      "sha256": "64f0aaf79560c09f647c84e917e07f170a41f485e88545b9155cb7f25c511ea9",
+      "source": "generated two-tone target-range chime"
+    }
+  ]
+}
