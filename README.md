@@ -252,6 +252,20 @@ To enable central collection in Vercel:
 3. Redeploy. The Lab start screen will change from **JSON backup mode** to
    **Central upload ready**, and each successful upload will show a receipt ID.
 
+### Private trace administration
+
+Set `DIBH_LAB_ADMIN_KEY` as a secret environment variable for Production and
+Preview in Vercel, then open `/lab-admin`. The admin password is checked on the
+server for every list, preview, and download request; it is never included in the
+client bundle. The page lists private JSON files under `lab-submissions/`, renders
+the selected breathing trace, downloads the stored JSON, and can upload an
+existing `dibh-lab/v3` JSON export from the current device.
+
+Contributor submission remains public when `DIBH_LAB_ACCESS_CODE` is unset.
+`DIBH_LAB_ADMIN_KEY` protects retrieval only and should be a separate, strong
+password. For local administration, add both the Blob credentials and
+`DIBH_LAB_ADMIN_KEY` to `.env.local`; never commit that file.
+
 Server uploads are capped at 4 MB so they stay below Vercel Function request
 limits. If guided traces exceed that size in future, migrate this route to the
 Vercel Blob client-upload flow.
