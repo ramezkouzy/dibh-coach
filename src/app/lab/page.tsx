@@ -217,7 +217,7 @@ type Recording = {
     targetAcquisitionSeconds: number | null;
     recoverySeconds: number | null;
     handsFree: boolean;
-    phonePlacement: "bottom_at_xiphoid_top_toward_head_screen_up" | null;
+    phonePlacement: "top_toward_umbilicus_charging_port_toward_head_screen_up" | null;
     targetMethod: "local_three_peak_delta_mean_combined_sd" | "median_relative_excursion" | null;
   };
   contributor: ContributorMetadata;
@@ -709,7 +709,7 @@ export default function LabPage() {
         targetAcquisitionSeconds: null,
         recoverySeconds: null,
         handsFree: Boolean(guidedConfig),
-        phonePlacement: guidedConfig ? "bottom_at_xiphoid_top_toward_head_screen_up" as const : null,
+        phonePlacement: guidedConfig ? "top_toward_umbilicus_charging_port_toward_head_screen_up" as const : null,
         targetMethod: guidedConfig?.calibrationHoldCount
           ? "local_three_peak_delta_mean_combined_sd" as const
           : null,
@@ -1857,7 +1857,7 @@ export default function LabPage() {
       enterGuidedStage("setup");
       enterGuidedPhase(
         "setup",
-        "SETUP • Phone flat, bottom edge at the xiphoid, screen up",
+        "SETUP • Phone flat, top toward the umbilicus, screen up",
       );
       const introResult = await coach("p0_session_intro", { phase: "setup" });
       if (introResult !== "ended") {
@@ -1865,7 +1865,7 @@ export default function LabPage() {
         setGuidedLabel("AUDIO UNAVAILABLE • Tap Test voice, then restart");
         return;
       }
-      await waitGuidedSeconds(3, "SETUP • Point the top of the phone toward your head");
+      await waitGuidedSeconds(3, "SETUP • Point the charging port toward your head");
 
       enterGuidedStage("rehearsal");
       enterGuidedPhase("rehearsal", "REHEARSAL • Learn the four cues");
@@ -2382,32 +2382,46 @@ export default function LabPage() {
 
         {labView === "home" && (
           <>
-            <section className="rounded-xl p-5" style={{ background: LAB_UI.surface, border: `1px solid ${LAB_UI.border}` }}>
-              <h2 className="text-lg font-semibold">Record and submit</h2>
-              <p className="mt-1 text-sm" style={{ color: LAB_UI.muted }}>
-                Follow these steps for every recording.
-              </p>
-              <div className="mt-4 grid gap-5 md:grid-cols-[minmax(220px,300px)_1fr] md:items-start">
-                <Image
-                  src="/images/phone-position-guide.jpg"
-                  alt="Illustration showing a phone positioned flat over the lower sternum and xiphoid process for breathing measurement"
-                  width={768}
-                  height={1376}
-                  priority
-                  className="w-full max-w-[300px] rounded-lg justify-self-center"
-                  style={{ border: `1px solid ${LAB_UI.border}` }}
-                />
-                <ol className="space-y-4 text-sm leading-relaxed" style={{ color: LAB_UI.muted }}>
-                  <li><strong style={{ color: LAB_UI.text }}>1. Enter the recording information.</strong> Select the participant code and acknowledge the data notice.</li>
-                  <li><strong style={{ color: LAB_UI.text }}>2. Choose a recording.</strong> Select Guided session or Free recording to continue.</li>
-                  <li>
-                    <strong style={{ color: LAB_UI.text }}>3. Position the phone.</strong> Place the bottom edge of the phone at the lower end of the breastbone, near the xiphoid process. The top of the phone should point toward the patient&apos;s head, with the screen facing up.
-                  </li>
-                  <li><strong style={{ color: LAB_UI.text }}>4. Record the trace.</strong> Keep the phone flat and still until the recording is complete.</li>
-                  <li><strong style={{ color: LAB_UI.text }}>5. Complete the trace.</strong> At the end, choose Submit, Retry, or Discard.</li>
-                </ol>
+            <details className="group rounded-xl" style={{ background: LAB_UI.surface, border: `1px solid ${LAB_UI.border}` }}>
+              <summary className="flex cursor-pointer list-none items-center justify-between gap-4 p-5 [&::-webkit-details-marker]:hidden">
+                <div>
+                  <h2 className="text-lg font-semibold">Record and submit</h2>
+                  <p className="mt-1 text-sm" style={{ color: LAB_UI.muted }}>
+                    Open for phone setup and trace submission instructions.
+                  </p>
+                </div>
+                <svg
+                  aria-hidden="true"
+                  viewBox="0 0 24 24"
+                  fill="none"
+                  className="h-6 w-6 shrink-0 transition-transform group-open:rotate-180"
+                  style={{ color: LAB_UI.accent }}
+                >
+                  <path d="m6 9 6 6 6-6" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" />
+                </svg>
+              </summary>
+              <div className="px-5 pb-5">
+                <div className="grid gap-5 md:grid-cols-[minmax(220px,300px)_1fr] md:items-start">
+                  <Image
+                    src="/images/phone-position-guide.jpg"
+                    alt="Illustration showing a phone positioned flat over the lower sternum and xiphoid process for breathing measurement"
+                    width={768}
+                    height={1376}
+                    className="w-full max-w-[300px] rounded-lg justify-self-center"
+                    style={{ border: `1px solid ${LAB_UI.border}` }}
+                  />
+                  <ol className="space-y-4 text-sm leading-relaxed" style={{ color: LAB_UI.muted }}>
+                    <li><strong style={{ color: LAB_UI.text }}>1. Enter the recording information.</strong> Select the participant code and acknowledge the data notice.</li>
+                    <li><strong style={{ color: LAB_UI.text }}>2. Choose a recording.</strong> Select Guided session or Free recording to continue.</li>
+                    <li>
+                      <strong style={{ color: LAB_UI.text }}>3. Position the phone.</strong> Place it flat over the lower breastbone near the xiphoid process. Point the top of the phone toward the umbilicus and the charging port toward the patient&apos;s head, with the screen facing up.
+                    </li>
+                    <li><strong style={{ color: LAB_UI.text }}>4. Record the trace.</strong> Keep the phone flat and still. Follow the prompts for a guided session, or tap Start free recording and add event markers as needed.</li>
+                    <li><strong style={{ color: LAB_UI.text }}>5. Submit the trace.</strong> When recording is complete, review the trace and notes, then choose Submit trace. Choose Retry trace to repeat it or Discard trace to remove the browser&apos;s copy.</li>
+                  </ol>
+                </div>
               </div>
-            </section>
+            </details>
 
             <section className="rounded-xl p-5 flex flex-col gap-4" style={{ background: LAB_UI.surface, border: `1px solid ${LAB_UI.border}` }}>
               <div>
@@ -2610,7 +2624,7 @@ export default function LabPage() {
                 </button>
               </div>
               <div className="text-sm leading-relaxed" style={{ color: LAB_UI.muted }}>
-                Place the phone flat with its bottom edge at the xiphoid process. Point the top of the phone toward the patient&apos;s head, with the screen facing up.
+                Place the phone flat near the xiphoid process. Point the top toward the umbilicus and the charging port toward the patient&apos;s head, with the screen facing up.
               </div>
               {!guidedActive ? (
                 <button
@@ -2790,7 +2804,7 @@ export default function LabPage() {
                     </label>
                   </div>
                   <div className="text-sm leading-relaxed" style={{ color: LAB_UI.muted }}>
-                    Phone: bottom edge at the xiphoid process, top pointed toward the patient&apos;s head, screen facing up.
+                    Phone: flat near the xiphoid process, top toward the umbilicus, charging port toward the patient&apos;s head, and screen facing up.
                   </div>
                 </>
               )}
