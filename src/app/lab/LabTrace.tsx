@@ -111,6 +111,23 @@ const FULL_HEIGHT = 430;
 const ALIGNED_HEIGHT = 300;
 const FULL_MARGIN = { left: 58, right: 18, top: 118, bottom: 42 };
 const ALIGNED_MARGIN = { left: 58, right: 18, top: 34, bottom: 42 };
+const TRACE_UI = {
+  surface: "#ffffff",
+  subtle: "#eef2f1",
+  border: "#d5dddb",
+  text: "#24312f",
+  muted: "#687774",
+  accent: "#155e5b",
+  accentSoft: "#e6f0ef",
+  trace: "#246b8e",
+  success: "#2f6f49",
+  successSoft: "#eaf4ed",
+  warning: "#8a6116",
+  warningSoft: "#fbf4e4",
+  danger: "#a33a3a",
+  dangerSoft: "#f9ecec",
+  grid: "#dce4e2",
+} as const;
 
 export default function LabTrace({ recording }: { recording: TraceRecording }) {
   const model = useMemo(() => buildTraceModel(recording), [recording]);
@@ -119,7 +136,7 @@ export default function LabTrace({ recording }: { recording: TraceRecording }) {
   const practiceByIndex = new Map((summary.practice ?? []).map((item) => [item.index, item]));
 
   if (!model.points.length) {
-    return <p className="text-xs opacity-70">This JSON does not contain a usable pitch trace.</p>;
+    return <p className="text-sm" style={{ color: TRACE_UI.muted }}>This JSON does not contain a usable pitch trace.</p>;
   }
 
   return (
@@ -142,8 +159,8 @@ export default function LabTrace({ recording }: { recording: TraceRecording }) {
 
       {target?.method === "local_three_peak_delta_mean_combined_sd" && (
         <div
-          className="rounded-md p-3 text-xs leading-relaxed"
-          style={{ background: "#0d2b1a", border: "1px solid #15803d", color: "#bbf7d0" }}
+          className="rounded-lg p-3 text-sm leading-relaxed"
+          style={{ background: TRACE_UI.successSoft, color: TRACE_UI.success }}
         >
           <div className="font-semibold">Local three-cycle calibration</div>
           <div className="mt-1 opacity-90">
@@ -156,8 +173,8 @@ export default function LabTrace({ recording }: { recording: TraceRecording }) {
 
       {recording.scenario?.includes("observation") && (
         <div
-          className="rounded-md p-3 text-xs leading-relaxed"
-          style={{ background: "#0c2d48", border: "1px solid #0369a1", color: "#bae6fd" }}
+          className="rounded-lg p-3 text-sm leading-relaxed"
+          style={{ background: TRACE_UI.accentSoft, color: TRACE_UI.accent }}
         >
           <div className="font-semibold">All three cycles were recorded unconditionally</div>
           <div className="mt-1 opacity-90">
@@ -171,8 +188,8 @@ export default function LabTrace({ recording }: { recording: TraceRecording }) {
 
       {target && !target.available && (target.learnHoldCount ?? 0) >= 3 && (
         <div
-          className="rounded-md p-3 text-xs leading-relaxed"
-          style={{ background: "#3a2208", border: "1px solid #92400e", color: "#fde68a" }}
+          className="rounded-lg p-3 text-sm leading-relaxed"
+          style={{ background: TRACE_UI.warningSoft, color: TRACE_UI.warning }}
         >
           <div className="font-semibold">Calibration range not established</div>
           <div className="mt-1 opacity-90">
@@ -185,19 +202,18 @@ export default function LabTrace({ recording }: { recording: TraceRecording }) {
       )}
 
       <div>
-        <div className="mb-2 flex flex-wrap gap-x-4 gap-y-1 text-[10px] uppercase tracking-wider opacity-70">
-          <Legend color="#64748b" label="relax / recovery" />
-          <Legend color="#38bdf8" label="inhale" />
-          <Legend color="#a78bfa" label="hold" />
-          <Legend color="#22c55e" label="stable" />
-          <Legend color="#86efac" label="local breathing peak" />
-          <Legend color="#f59e0b" label="target band" />
-          <Legend color="#fb7185" label="prerecorded prompt" />
+        <div className="mb-2 flex flex-wrap gap-x-4 gap-y-1 text-xs" style={{ color: TRACE_UI.muted }}>
+          <Legend color={TRACE_UI.muted} label="relax / recovery" />
+          <Legend color={TRACE_UI.trace} label="inhale" />
+          <Legend color={TRACE_UI.accent} label="hold" />
+          <Legend color={TRACE_UI.success} label="stable / local peak" />
+          <Legend color={TRACE_UI.warning} label="target band" />
+          <Legend color={TRACE_UI.danger} label="audio prompt" />
         </div>
         <svg
           viewBox={`0 0 ${FULL_WIDTH} ${FULL_HEIGHT}`}
-          className="block w-full rounded-md"
-          style={{ background: "#0a0c10", border: "1px solid #303441" }}
+          className="block w-full rounded-lg"
+          style={{ background: TRACE_UI.surface, border: `1px solid ${TRACE_UI.border}` }}
           role="img"
           aria-labelledby="full-trace-title full-trace-desc"
         >
@@ -228,22 +244,22 @@ export default function LabTrace({ recording }: { recording: TraceRecording }) {
                 y={yTop}
                 width={Math.max(1, model.fullChart.x(band.endMs) - model.fullChart.x(band.startMs))}
                 height={Math.max(2, yBottom - yTop)}
-                fill="#f59e0b"
+                fill={TRACE_UI.warning}
                 opacity="0.18"
               >
                 <title>{`Practice ${band.index} target ±${band.tolerance.toFixed(2)}°`}</title>
               </rect>
             );
           })}
-          <path d={model.fullPath} fill="none" stroke="#e7e5e4" strokeWidth="1.5" />
+          <path d={model.fullPath} fill="none" stroke={TRACE_UI.text} strokeWidth="1.5" />
           {model.localBreathingPeaks.map((peak) => (
             <circle
               key={`local-peak-${peak.holdIndex}-${peak.peakNumber}-${peak.t}`}
               cx={model.fullChart.x(peak.t)}
               cy={model.fullChart.y(peak.p)}
               r="4"
-              fill="#22c55e"
-              stroke="#bbf7d0"
+              fill={TRACE_UI.success}
+              stroke={TRACE_UI.successSoft}
               strokeWidth="1.2"
             >
               <title>{`Hold ${peak.holdIndex} local breathing peak ${peak.peakNumber}`}</title>
@@ -254,7 +270,7 @@ export default function LabTrace({ recording }: { recording: TraceRecording }) {
               key={segment.key}
               d={segment.path}
               fill="none"
-              stroke="#22c55e"
+              stroke={TRACE_UI.success}
               strokeWidth="3"
             >
               <title>{segment.label}</title>
@@ -267,7 +283,7 @@ export default function LabTrace({ recording }: { recording: TraceRecording }) {
                 x2={model.fullChart.x(event.t)}
                 y1={promptLaneY(index) + 5}
                 y2={FULL_HEIGHT - FULL_MARGIN.bottom}
-                stroke="#fb7185"
+                stroke={TRACE_UI.danger}
                 strokeWidth="1"
                 strokeDasharray="4 4"
               />
@@ -275,7 +291,7 @@ export default function LabTrace({ recording }: { recording: TraceRecording }) {
                 cx={model.fullChart.x(event.t)}
                 cy={promptLaneY(index)}
                 r="3.5"
-                fill="#fb7185"
+                fill={TRACE_UI.danger}
               >
                 <title>{coachLabel(event)}</title>
               </circle>
@@ -283,7 +299,7 @@ export default function LabTrace({ recording }: { recording: TraceRecording }) {
                 x={model.fullChart.x(event.t)}
                 y={promptLaneY(index) - 6}
                 textAnchor="middle"
-                fill="#fda4af"
+                fill={TRACE_UI.danger}
                 fontSize="9"
               >
                 {promptLabel(event)}
@@ -298,7 +314,7 @@ export default function LabTrace({ recording }: { recording: TraceRecording }) {
                 key={`hold-label-${hold.index}`}
                 x={model.fullChart.x(start as number) + 5}
                 y={FULL_HEIGHT - FULL_MARGIN.bottom - 8}
-                fill="#e7e5e4"
+                fill={TRACE_UI.text}
                 fontSize="12"
               >
                 {holdRoleCode(hold.role)}{hold.index}
@@ -314,8 +330,8 @@ export default function LabTrace({ recording }: { recording: TraceRecording }) {
         </div>
         <svg
           viewBox={`0 0 ${FULL_WIDTH} ${ALIGNED_HEIGHT}`}
-          className="block w-full rounded-md"
-          style={{ background: "#0a0c10", border: "1px solid #303441" }}
+          className="block w-full rounded-lg"
+          style={{ background: TRACE_UI.surface, border: `1px solid ${TRACE_UI.border}` }}
           role="img"
           aria-labelledby="aligned-title aligned-desc"
         >
@@ -337,7 +353,7 @@ export default function LabTrace({ recording }: { recording: TraceRecording }) {
                   y={top}
                   width={FULL_WIDTH - ALIGNED_MARGIN.left - ALIGNED_MARGIN.right}
                   height={Math.max(2, bottom - top)}
-                  fill="#f59e0b"
+                  fill={TRACE_UI.warning}
                   opacity="0.16"
                 >
                   <title>{`Learned excursion ${targetValue.toFixed(2)}° ±${tolerance.toFixed(2)}°`}</title>
@@ -370,7 +386,7 @@ export default function LabTrace({ recording }: { recording: TraceRecording }) {
               <path
                 d={line.path}
                 fill="none"
-                stroke={line.role === "practice" ? "#a78bfa" : "#38bdf8"}
+                stroke={line.role === "practice" ? TRACE_UI.accent : TRACE_UI.trace}
                 strokeWidth={line.role === "practice" ? "2.4" : "1.7"}
                 strokeDasharray={line.role === "practice" ? "7 4" : undefined}
                 opacity={line.valid ? 0.9 : 0.45}
@@ -380,7 +396,7 @@ export default function LabTrace({ recording }: { recording: TraceRecording }) {
               <text
                 x={Math.min(FULL_WIDTH - ALIGNED_MARGIN.right - 18, line.endX + 4)}
                 y={line.endY}
-                fill={line.role === "practice" ? "#a78bfa" : "#38bdf8"}
+                fill={line.role === "practice" ? TRACE_UI.accent : TRACE_UI.trace}
                 fontSize="12"
               >
                 {holdRoleCode(line.role)}{line.index}
@@ -396,8 +412,8 @@ export default function LabTrace({ recording }: { recording: TraceRecording }) {
           return (
             <div
               key={`hold-${hold.index}`}
-              className="rounded-md p-3 text-xs"
-              style={{ background: "#1c1f26", border: "1px solid #303441" }}
+              className="rounded-lg p-3 text-sm"
+              style={{ background: TRACE_UI.surface, border: `1px solid ${TRACE_UI.border}` }}
             >
               <div className="mb-2 flex items-center justify-between">
                 <span className="font-semibold">
@@ -433,7 +449,7 @@ export default function LabTrace({ recording }: { recording: TraceRecording }) {
               />
               {practice && (
                 <>
-                  <div className="my-2 border-t" style={{ borderColor: "#303441" }} />
+                  <div className="my-2 border-t" style={{ borderColor: TRACE_UI.border }} />
                   <MetricRow label="target error" value={formatSignedDeg(practice.excursionTargetErrorDeg)} />
                   <MetricRow
                     label="target acquisition"
@@ -635,18 +651,18 @@ function buildTraceModel(recording: TraceRecording) {
     };
   });
   const alignedPhaseMarkers = [
-    { t: 0, label: "INHALE", color: "#38bdf8" },
+    { t: 0, label: "INHALE", color: TRACE_UI.trace },
     {
       t: medianNumber(alignedSeries.map((item) => item.holdStartT)),
       label: "HOLD",
-      color: "#a78bfa",
+      color: TRACE_UI.accent,
     },
     {
       t: medianNumber(alignedSeries.map((item) => item.releaseT)),
       label: "RELEASE",
-      color: "#fb7185",
+      color: TRACE_UI.danger,
     },
-  ].filter((marker): marker is { t: number; label: string; color: string } => Number.isFinite(marker.t));
+  ].filter((marker) => Number.isFinite(marker.t));
   return {
     points,
     fullChart,
@@ -707,10 +723,10 @@ function ChartGrid({
             x2={FULL_WIDTH - margin.right}
             y1={model.y(tick)}
             y2={model.y(tick)}
-            stroke="#303441"
+            stroke={TRACE_UI.grid}
             strokeWidth="1"
           />
-          <text x={margin.left - 8} y={model.y(tick) + 4} textAnchor="end" fill="#a8a29e" fontSize="11">
+          <text x={margin.left - 8} y={model.y(tick) + 4} textAnchor="end" fill={TRACE_UI.muted} fontSize="11">
             {tick.toFixed(1)}{yUnit}
           </text>
         </g>
@@ -722,14 +738,14 @@ function ChartGrid({
             x2={model.x(tick)}
             y1={margin.top}
             y2={height - margin.bottom}
-            stroke="#242833"
+            stroke={TRACE_UI.grid}
             strokeWidth="1"
           />
           <text
             x={model.x(tick)}
             y={height - margin.bottom + 20}
             textAnchor="middle"
-            fill="#a8a29e"
+            fill={TRACE_UI.muted}
             fontSize="11"
           >
             {(xUnit === "s" && model.xMax > 100 ? tick / 1000 : tick).toFixed(0)}{xUnit}
@@ -780,12 +796,12 @@ function guidedPhases(events: TraceEvent[], durationMs: number) {
 }
 
 function phaseColor(kind: string) {
-  if (kind === "inhale") return "#38bdf8";
-  if (kind === "hold") return "#a78bfa";
-  if (kind === "release") return "#fb7185";
-  if (kind === "ready") return "#f59e0b";
-  if (kind === "practice") return "#22c55e";
-  return "#64748b";
+  if (kind === "inhale") return TRACE_UI.trace;
+  if (kind === "hold") return TRACE_UI.accent;
+  if (kind === "release") return TRACE_UI.danger;
+  if (kind === "ready") return TRACE_UI.warning;
+  if (kind === "practice") return TRACE_UI.success;
+  return TRACE_UI.muted;
 }
 
 function promptLaneY(index: number) {
@@ -839,9 +855,9 @@ function medianNumber(values: Array<number | null | undefined>) {
 
 function TraceStat({ label, value }: { label: string; value: string }) {
   return (
-    <div className="rounded-md p-2" style={{ background: "#1c1f26", border: "1px solid #303441" }}>
-      <div className="text-[9px] uppercase tracking-wider opacity-60">{label}</div>
-      <div className="mt-1 font-mono text-sm tabular-nums">{value}</div>
+    <div className="rounded-lg p-3" style={{ background: TRACE_UI.surface, border: `1px solid ${TRACE_UI.border}` }}>
+      <div className="text-xs" style={{ color: TRACE_UI.muted }}>{label}</div>
+      <div className="mt-1 font-mono text-base tabular-nums">{value}</div>
     </div>
   );
 }

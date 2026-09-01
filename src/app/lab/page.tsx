@@ -9,6 +9,27 @@ import {
 } from "@/lib/breath-cycle-analysis.mjs";
 import LabTrace, { type TraceRecording } from "./LabTrace";
 
+const LAB_UI = {
+  canvas: "#f4f6f5",
+  surface: "#ffffff",
+  subtle: "#eef2f1",
+  border: "#d5dddb",
+  text: "#24312f",
+  muted: "#687774",
+  accent: "#155e5b",
+  accentStrong: "#0f4c4a",
+  accentSoft: "#e6f0ef",
+  success: "#2f6f49",
+  successSoft: "#eaf4ed",
+  warning: "#8a6116",
+  warningSoft: "#fbf4e4",
+  danger: "#a33a3a",
+  dangerSoft: "#f9ecec",
+  trace: "#246b8e",
+  traceSoft: "#e8f1f5",
+  grid: "#dce4e2",
+} as const;
+
 // Schema v3: full multi-channel sensor capture plus the exact EMA pitch used
 // by the P0 analyzer. Raw beta remains available so smoothing can be replayed.
 // Each sample is a row of
@@ -2289,63 +2310,62 @@ export default function LabPage() {
   // ---- render -------------------------------------------------------------
   return (
     <main
-      className="flex-1 flex flex-col items-stretch"
+      className="lab-shell flex-1 flex flex-col items-stretch"
       style={{
-        background: "#0f1115",
-        color: "#e7e5e4",
-        fontFamily: "ui-monospace, SFMono-Regular, Menlo, monospace",
+        background: LAB_UI.canvas,
+        color: LAB_UI.text,
         minHeight: "100dvh",
-        padding: "16px 14px 32px",
+        padding: "28px 18px 48px",
       }}
     >
-      <div className="max-w-5xl w-full mx-auto flex flex-col gap-3">
-        <div className="flex items-baseline justify-between">
-          <h1 className="text-lg font-semibold flex items-center gap-2">
-            DIBH Lab P0
+      <div className="max-w-4xl w-full mx-auto flex flex-col gap-6">
+        <header className="flex items-start justify-between gap-6 pb-4" style={{ borderBottom: `1px solid ${LAB_UI.border}` }}>
+          <div>
+            <h1 className="text-2xl font-semibold tracking-[-0.02em] flex items-center gap-2">
+            DIBH Motion Study
             <span
-              className="rounded px-1.5 py-0.5 text-[9px] uppercase tracking-wider"
-              style={{ background: "#0c2d48", color: "#7dd3fc", border: "1px solid #0369a1" }}
+              className="rounded px-1.5 py-0.5 text-[10px] font-medium tracking-normal"
+              style={{ background: LAB_UI.subtle, color: LAB_UI.muted }}
             >
               v1.2
             </span>
-          </h1>
-          <a href="/" className="text-xs underline opacity-70">
-            ← coach
+            </h1>
+            <p className="mt-1 text-sm" style={{ color: LAB_UI.muted }}>
+              Laboratory recording and review
+            </p>
+          </div>
+          <a href="/" className="text-sm font-medium whitespace-nowrap" style={{ color: LAB_UI.accent }}>
+            Return to coach
           </a>
-        </div>
-        <p className="text-xs opacity-70 leading-relaxed">
+        </header>
+        <p className="text-sm leading-relaxed -mt-2" style={{ color: LAB_UI.muted }}>
           {labView === "home"
-            ? "Record a phone-motion breathing trace, review the result, and send one complete data file."
+            ? "Record a phone-motion breathing trace, review it, and submit one complete data file."
             : labView === "run"
-              ? "Keep the phone in the selected position until the recording is complete."
-              : "Recording complete. Review the trace, add your notes, then submit or save the JSON."}
+              ? "Keep the phone in position until the recording is complete."
+              : "Review the trace, add a note if needed, then submit or download the file."}
         </p>
 
         {labView === "home" && (
           <>
-            <div className="rounded-lg p-4" style={{ background: "#111827", border: "1px solid #334155" }}>
-              <div className="text-xs uppercase tracking-wider" style={{ color: "#7dd3fc" }}>How to contribute</div>
-              <div className="mt-3 grid grid-cols-1 sm:grid-cols-3 gap-2">
-                {[
-                  ["1", "Identify", "Enter the participant code you were given. Do not enter a name, birth date, or email."],
-                  ["2", "Record", "Choose one run. Follow its placement instructions and keep the phone still."],
-                  ["3", "Send", "Review the trace, add notes, then submit it. Save the JSON as a backup."],
-                ].map(([number, title, detail]) => (
-                  <div key={number} className="rounded-md p-3" style={{ background: "#0a0c10", border: "1px solid #303441" }}>
-                    <div className="text-xs font-semibold"><span style={{ color: "#38bdf8" }}>{number}.</span> {title}</div>
-                    <div className="mt-1 text-[11px] leading-relaxed opacity-70">{detail}</div>
-                  </div>
-                ))}
-              </div>
-            </div>
+            <details className="group rounded-lg px-4 py-3" style={{ background: LAB_UI.accentSoft }}>
+              <summary className="cursor-pointer text-sm font-semibold" style={{ color: LAB_UI.accent }}>
+                How to record and submit
+              </summary>
+              <ol className="mt-3 grid gap-2 text-sm leading-relaxed sm:grid-cols-3" style={{ color: LAB_UI.muted }}>
+                <li><strong style={{ color: LAB_UI.text }}>1. Identify.</strong> Select the participant code.</li>
+                <li><strong style={{ color: LAB_UI.text }}>2. Record.</strong> Choose a protocol and follow the placement instructions.</li>
+                <li><strong style={{ color: LAB_UI.text }}>3. Submit.</strong> Review the trace, add notes, and send the file.</li>
+              </ol>
+            </details>
 
-            <div className="rounded-lg p-4 flex flex-col gap-3" style={{ background: "#1c1f26", border: "1px solid #303441" }}>
+            <section className="rounded-xl p-5 flex flex-col gap-4" style={{ background: LAB_UI.surface, border: `1px solid ${LAB_UI.border}` }}>
               <div>
-                <div className="text-xs uppercase tracking-wider opacity-60">Recording information</div>
-                <div className="mt-1 text-[11px] opacity-65">These fields will be included in every JSON trace you record during this visit.</div>
+                <h2 className="text-lg font-semibold">Recording information</h2>
+                <p className="mt-1 text-sm" style={{ color: LAB_UI.muted }}>Used for each trace recorded during this visit.</p>
               </div>
-              <label className="text-[11px] opacity-75 flex flex-col gap-1">
-                Participant code <span style={{ color: "#fda4af" }}>(required)</span>
+              <label className="text-sm font-medium flex flex-col gap-1.5">
+                Participant code <span style={{ color: LAB_UI.danger }}>(required)</span>
                 <select
                   value={participantCodeSelection}
                   onChange={(event) => {
@@ -2353,8 +2373,8 @@ export default function LabPage() {
                     setParticipantCodeSelection(selection);
                     setParticipantCode(selection === "manual" ? "" : selection);
                   }}
-                  className="rounded p-2.5 text-sm"
-                  style={{ background: "#0a0c10", color: "#e7e5e4", border: "1px solid #303441" }}
+                  className="rounded-lg px-3 py-2.5 text-base"
+                  style={{ background: LAB_UI.surface, color: LAB_UI.text, border: `1px solid ${LAB_UI.border}` }}
                 >
                   <option value="">Choose a participant code</option>
                   {PARTICIPANT_CODES.map((code) => (
@@ -2364,130 +2384,132 @@ export default function LabPage() {
                 </select>
               </label>
               {participantCodeSelection === "manual" && (
-                <label className="text-[11px] opacity-75 flex flex-col gap-1">
-                  Other participant code <span style={{ color: "#fda4af" }}>(required)</span>
+                <label className="text-sm font-medium flex flex-col gap-1.5">
+                  Other participant code <span style={{ color: LAB_UI.danger }}>(required)</span>
                   <input
                     value={participantCode}
                     onChange={(event) => setParticipantCode(event.target.value)}
                     maxLength={48}
                     autoCapitalize="none"
                     placeholder="Example: SITE01-P004"
-                    className="rounded p-2.5 text-sm"
-                    style={{ background: "#0a0c10", color: "#e7e5e4", border: "1px solid #303441" }}
+                    className="rounded-lg px-3 py-2.5 text-base"
+                    style={{ background: LAB_UI.surface, color: LAB_UI.text, border: `1px solid ${LAB_UI.border}` }}
                   />
                 </label>
               )}
-              <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
-                <label className="text-[11px] opacity-75 flex flex-col gap-1">
-                  Site or group code (optional)
-                  <input
-                    value={siteCode}
-                    onChange={(event) => setSiteCode(event.target.value)}
-                    maxLength={48}
-                    placeholder="Example: HOUSTON"
-                    className="rounded p-2.5 text-sm"
-                    style={{ background: "#0a0c10", color: "#e7e5e4", border: "1px solid #303441" }}
-                  />
-                </label>
-                <label className="text-[11px] opacity-75 flex flex-col gap-1">
-                  Run label (optional)
-                  <input
-                    value={runLabel}
-                    onChange={(event) => setRunLabel(event.target.value)}
-                    maxLength={80}
-                    placeholder="Example: phone on upper abdomen"
-                    className="rounded p-2.5 text-sm"
-                    style={{ background: "#0a0c10", color: "#e7e5e4", border: "1px solid #303441" }}
-                  />
-                  <span className="text-[10px] opacity-65">
-                    Describe the breath-hold type, phone position, or anything different about this run.
-                  </span>
-                </label>
-              </div>
-              {centralCollection === "ready" && (
-                <label className="text-[11px] opacity-75 flex flex-col gap-1">
-                  Study access code (if your coordinator provided one)
-                  <input
-                    type="password"
-                    value={studyAccessCode}
-                    onChange={(event) => setStudyAccessCode(event.target.value)}
-                    maxLength={80}
-                    autoComplete="off"
-                    className="rounded p-2.5 text-sm"
-                    style={{ background: "#0a0c10", color: "#e7e5e4", border: "1px solid #303441" }}
-                  />
-                </label>
-              )}
-              <label className="flex items-start gap-2 rounded-md p-2.5 text-[11px] leading-relaxed" style={{ background: "#0a0c10", border: "1px solid #303441" }}>
+              <details className="rounded-lg px-3 py-2.5" style={{ background: LAB_UI.subtle }}>
+                <summary className="cursor-pointer text-sm font-medium">Optional recording details</summary>
+                <div className="mt-3 grid grid-cols-1 sm:grid-cols-2 gap-3">
+                  <label className="text-sm flex flex-col gap-1.5">
+                    Site or group code
+                    <input
+                      value={siteCode}
+                      onChange={(event) => setSiteCode(event.target.value)}
+                      maxLength={48}
+                      placeholder="Example: HOUSTON"
+                      className="rounded-lg px-3 py-2.5 text-base"
+                      style={{ background: LAB_UI.surface, color: LAB_UI.text, border: `1px solid ${LAB_UI.border}` }}
+                    />
+                  </label>
+                  <label className="text-sm flex flex-col gap-1.5">
+                    Run label
+                    <input
+                      value={runLabel}
+                      onChange={(event) => setRunLabel(event.target.value)}
+                      maxLength={80}
+                      placeholder="Breath-hold type or phone position"
+                      className="rounded-lg px-3 py-2.5 text-base"
+                      style={{ background: LAB_UI.surface, color: LAB_UI.text, border: `1px solid ${LAB_UI.border}` }}
+                    />
+                  </label>
+                  {centralCollection === "ready" && (
+                    <label className="text-sm flex flex-col gap-1.5 sm:col-span-2">
+                      Study access code
+                      <input
+                        type="password"
+                        value={studyAccessCode}
+                        onChange={(event) => setStudyAccessCode(event.target.value)}
+                        maxLength={80}
+                        autoComplete="off"
+                        className="rounded-lg px-3 py-2.5 text-base"
+                        style={{ background: LAB_UI.surface, color: LAB_UI.text, border: `1px solid ${LAB_UI.border}` }}
+                      />
+                    </label>
+                  )}
+                </div>
+              </details>
+              <label className="flex items-start gap-3 rounded-lg p-3 text-sm leading-relaxed" style={{ background: LAB_UI.subtle }}>
                 <input
                   type="checkbox"
                   checked={dataAcknowledged}
                   onChange={(event) => setDataAcknowledged(event.target.checked)}
-                  className="mt-0.5"
+                  className="mt-1 h-4 w-4 shrink-0 accent-[#155e5b]"
                 />
                 <span>
-                  I understand that the trace will contain the participant code, my notes,
-                  phone motion readings, and technical browser/device characteristics.
-                  I will not enter personal health information in these fields.
+                  This trace includes the participant code, notes, phone-motion data, and
+                  device characteristics. Do not enter personal health information.
                 </span>
               </label>
-            </div>
+            </section>
 
-            <div className="rounded-lg p-4 flex flex-col gap-3" style={{ background: "#1c1f26", border: "1px solid #303441" }}>
+            <section className="rounded-xl p-5 flex flex-col gap-4" style={{ background: LAB_UI.surface, border: `1px solid ${LAB_UI.border}` }}>
               <div className="flex items-start justify-between gap-3">
                 <div>
-                  <div className="text-xs uppercase tracking-wider opacity-60">Choose a recording</div>
-                  <div className="mt-1 text-[11px] opacity-65">Motion permission is requested after you choose.</div>
+                  <h2 className="text-lg font-semibold">Choose a recording</h2>
+                  <p className="mt-1 text-sm" style={{ color: LAB_UI.muted }}>Motion access is requested after selection.</p>
                 </div>
-                <span className="text-[10px]" style={{ color: centralCollection === "ready" ? "#86efac" : "#fdba74" }}>
-                  {centralCollection === "checking" ? "Checking upload…" : centralCollection === "ready" ? "Central upload ready" : "JSON backup mode"}
+                <span className="text-xs whitespace-nowrap" style={{ color: centralCollection === "ready" ? LAB_UI.success : LAB_UI.warning }}>
+                  {centralCollection === "checking" ? "Checking upload" : centralCollection === "ready" ? "Upload ready" : "Download only"}
                 </span>
               </div>
-              <div className="grid grid-cols-1 sm:grid-cols-3 gap-2">
+              <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
                 {([
-                  ["guided", "Guided calibration", "Three calibration holds followed by coached target holds.", "#16a34a"],
-                  ["position-study", "Position study", "Compare normal-breathing signal at different body locations.", "#0ea5e9"],
-                  ["free", "Free record", "Record an open-ended trace and add event markers manually.", "#dc2626"],
-                ] as const).map(([mode, title, detail, color]) => (
+                  ["guided", "Guided session", "Calibrate, then complete coached breath holds."],
+                  ["position-study", "Position study", "Compare breathing signal at several body locations."],
+                  ["free", "Free recording", "Record an open trace with manual event markers."],
+                ] as const).map(([mode, title, detail]) => (
                   <button
                     key={mode}
                     onClick={() => void openLabMode(mode)}
                     disabled={!participantCode.trim() || !dataAcknowledged}
-                    className="rounded-lg p-3 text-left disabled:opacity-35"
-                    style={{ background: "#0a0c10", border: "1px solid #303441" }}
+                    className="lab-mode-option rounded-lg p-4 text-left disabled:opacity-40"
+                    style={{ background: LAB_UI.surface, border: `1px solid ${LAB_UI.border}` }}
                   >
-                    <span className="block text-sm font-semibold" style={{ color }}>{title}</span>
-                    <span className="block mt-1 text-[10px] leading-relaxed opacity-65">{detail}</span>
+                    <span className="block text-base font-semibold" style={{ color: LAB_UI.accent }}>{title}</span>
+                    <span className="block mt-1 text-sm leading-relaxed" style={{ color: LAB_UI.muted }}>{detail}</span>
                   </button>
                 ))}
               </div>
               {(!participantCode.trim() || !dataAcknowledged) && (
-                <div className="text-[10px] opacity-55">Enter a participant code and check the data acknowledgement to continue.</div>
+                <div className="text-sm" style={{ color: LAB_UI.muted }}>Select a participant code and acknowledge the data notice to continue.</div>
               )}
-            </div>
+            </section>
           </>
         )}
 
         {labView === "run" && granted && (
           <>
-            <div className="grid grid-cols-2 gap-2">
+            <div className="grid grid-cols-2 gap-3">
               <Stat label="pitch (β)" value={`${pitch.toFixed(2)}°`} />
               <Stat label="time / count" value={`${duration.toFixed(1)}s · ${count}`} />
             </div>
 
             {/* Guided session card */}
-            {selectedMode === "guided" && <div
-              className="rounded-lg p-3 flex flex-col gap-2"
-              style={{ background: "#1c1f26", border: "1px solid #303441" }}
+            {selectedMode === "guided" && <section
+              className="rounded-xl p-4 sm:p-5 flex flex-col gap-4"
+              style={{ background: LAB_UI.surface, border: `1px solid ${LAB_UI.border}` }}
             >
               <div className="flex items-center justify-between gap-3">
-                <div className="text-xs uppercase tracking-wider opacity-60">P0 guided run</div>
+                <div>
+                  <h2 className="text-lg font-semibold">Guided session</h2>
+                  {!guidedActive && <p className="mt-1 text-sm" style={{ color: LAB_UI.muted }}>Three calibration holds, followed by three coached holds.</p>}
+                </div>
                 {!guidedActive ? (
-                  <button onClick={() => setLabView("home")} className="text-[10px] underline opacity-60">
-                    change recording
+                  <button onClick={() => setLabView("home")} className="text-sm font-medium" style={{ color: LAB_UI.accent }}>
+                    Change
                   </button>
                 ) : (
-                  <div className="text-[10px] uppercase tracking-wider" style={{ color: "#38bdf8" }}>
+                  <div className="text-xs font-medium" style={{ color: LAB_UI.accent }}>
                     3 breaths → calibrate ×3 → coach ×3
                   </div>
                 )}
@@ -2508,11 +2530,11 @@ export default function LabPage() {
               <div
                 className="rounded-md p-2 flex items-center justify-between gap-3"
                 style={{
-                  background: audioStatus === "error" ? "#2a1010" : "#0a0c10",
-                  border: `1px solid ${audioStatus === "error" ? "#7f1d1d" : "#303441"}`,
+                  background: audioStatus === "error" ? LAB_UI.dangerSoft : LAB_UI.subtle,
+                  border: `1px solid ${audioStatus === "error" ? LAB_UI.danger : LAB_UI.border}`,
                 }}
               >
-                <div className="text-[11px] leading-relaxed">
+                <div className="text-sm leading-relaxed">
                   <div className="font-semibold">
                     {audioStatus === "ready"
                       ? "Voice ready"
@@ -2522,41 +2544,40 @@ export default function LabPage() {
                           ? "Voice could not play"
                           : "Check the prerecorded voice first"}
                   </div>
-                  <div className="opacity-60">
+                  <div style={{ color: LAB_UI.muted }}>
                     {audioStatus === "error"
                       ? "Turn up media volume, then tap Test voice again."
-                      : "You should hear the complete deep-breath instruction."}
+                      : "Confirm that the instruction is clear before starting."}
                   </div>
-                  <div className="opacity-45">Voice prompts are AI-generated with OpenAI Coral.</div>
+                  <div className="text-xs mt-0.5" style={{ color: LAB_UI.muted }}>AI-generated voice: OpenAI Coral</div>
                 </div>
                 <button
                   onClick={testVoice}
                   disabled={recording || audioStatus === "testing"}
-                  className="rounded-md px-3 py-2 text-xs font-semibold shrink-0 disabled:opacity-40"
-                  style={{ background: "#2563eb", color: "white" }}
+                  className="rounded-lg px-4 py-2 text-sm font-semibold shrink-0 disabled:opacity-40"
+                  style={{ background: LAB_UI.accent, color: "white" }}
                 >
                   Test voice
                 </button>
               </div>
-              <div className="text-[11px] leading-relaxed opacity-70">
-                Phone placement: flat on the belly with the charging port pointing toward
-                the patient&apos;s face. Inhale is normalized upward on the continuous trace.
+              <div className="text-sm leading-relaxed" style={{ color: LAB_UI.muted }}>
+                Place the phone flat on the abdomen, with the charging port toward the patient&apos;s face.
               </div>
               {!guidedActive ? (
                 <button
                   onClick={startGuided}
-                  className="rounded-md py-3 font-semibold"
-                  style={{ background: "#16a34a", color: "white" }}
+                  className="rounded-lg py-3 text-base font-semibold"
+                  style={{ background: LAB_UI.accent, color: "white" }}
                 >
-                  ▶ Start hands-free run
+                  Start hands-free session
                 </button>
               ) : (
                 <>
                   <div className="text-center py-2">
-                    <div className="text-2xl font-semibold tracking-widest" style={{ color: guidedPhaseColor(guidedPhase) }}>
+                    <div className="text-2xl font-semibold tracking-wide" style={{ color: guidedPhaseColor(guidedPhase) }}>
                       {guidedPhase}
                     </div>
-                    <div className="text-xs opacity-70 mt-1 mb-1">{guidedLabel}</div>
+                    <div className="text-sm mt-1 mb-1" style={{ color: LAB_UI.muted }}>{guidedLabel}</div>
                     <div className="text-3xl font-mono">
                       {guidedPhase === "REST"
                         ? `${stepCountdown}/${3} breaths`
@@ -2568,35 +2589,38 @@ export default function LabPage() {
                   <button
                     onClick={cancelGuided}
                     className="rounded-md py-2 text-sm"
-                    style={{ background: "#3a0f0f", color: "#fca5a5", border: "1px solid #5a1f1f" }}
+                    style={{ background: LAB_UI.surface, color: LAB_UI.danger, border: `1px solid ${LAB_UI.border}` }}
                   >
                     Cancel
                   </button>
                 </>
               )}
-              <div className="text-[11px] opacity-60 leading-relaxed">
-                Every hold begins only after three complete regular cycles and physiological
-                hold detection. The 10-second clock never pauses; simulated beam time runs
-                only inside the green band. Two unsuccessful corrections return the patient
-                to three fresh breathing cycles before retrying.
-              </div>
-            </div>}
+              <details className="text-sm rounded-lg px-3 py-2.5" style={{ background: LAB_UI.subtle, color: LAB_UI.muted }}>
+                <summary className="cursor-pointer font-medium" style={{ color: LAB_UI.text }}>How the session is scored</summary>
+                <p className="mt-2 leading-relaxed">
+                  A hold begins after three regular breathing cycles. Beam time is counted only
+                  while the trace remains in the target band. Two unsuccessful corrections return
+                  the patient to normal breathing before another attempt.
+                </p>
+              </details>
+            </section>}
 
             {/* Free record */}
-            {selectedMode !== "guided" && <div
-              className="rounded-lg p-3 flex flex-col gap-2"
-              style={{ background: "#1c1f26", border: "1px solid #303441" }}
+            {selectedMode !== "guided" && <section
+              className="rounded-xl p-4 sm:p-5 flex flex-col gap-4"
+              style={{ background: LAB_UI.surface, border: `1px solid ${LAB_UI.border}` }}
             >
               <div className="flex items-center justify-between gap-3">
-                <div className="text-xs uppercase tracking-wider opacity-60">
+                <h2 className="text-lg font-semibold">
                   {selectedMode === "position-study" ? "Position study" : "Free record"}
-                </div>
+                </h2>
                 <button
                   onClick={() => setLabView("home")}
                   disabled={recording}
-                  className="text-[10px] underline opacity-60 disabled:opacity-25"
+                  className="text-sm font-medium disabled:opacity-25"
+                  style={{ color: LAB_UI.accent }}
                 >
-                  change recording
+                  Change
                 </button>
               </div>
 
@@ -2606,8 +2630,8 @@ export default function LabPage() {
                     value={scenario}
                     onChange={(e) => setScenario(e.target.value)}
                     disabled={recording}
-                    className="rounded p-2 text-sm"
-                    style={{ background: "#0a0c10", color: "#e7e5e4", border: "1px solid #303441" }}
+                    className="rounded-lg px-3 py-2.5 text-base"
+                    style={{ background: LAB_UI.surface, color: LAB_UI.text, border: `1px solid ${LAB_UI.border}` }}
                   >
                     {SCENARIOS.map((s) => (
                       <option key={s} value={s}>
@@ -2621,26 +2645,25 @@ export default function LabPage() {
                       value={customScenario}
                       onChange={(e) => setCustomScenario(e.target.value)}
                       disabled={recording}
-                      className="rounded p-2 text-sm"
-                      style={{ background: "#0a0c10", color: "#e7e5e4", border: "1px solid #303441" }}
+                      className="rounded-lg px-3 py-2.5 text-base"
+                      style={{ background: LAB_UI.surface, color: LAB_UI.text, border: `1px solid ${LAB_UI.border}` }}
                     />
                   )}
                 </>
               ) : (
                 <>
-                  <div className="rounded-md p-2 text-[11px] leading-relaxed" style={{ background: "#071018", color: "#bae6fd", border: "1px solid #164e63" }}>
-                    Keep posture, phone orientation, attachment pressure, and duration the same.
-                    Breathe normally—there are no voice cues, holds, targets, or coaching in this mode.
-                    The first 3 seconds are excluded from analysis for placement settling.
+                  <div className="rounded-lg p-3 text-sm leading-relaxed" style={{ background: LAB_UI.accentSoft, color: LAB_UI.text }}>
+                    Breathe normally and keep the setup unchanged between recordings. The first
+                    three seconds are excluded while the phone settles.
                   </div>
-                  <label className="text-[11px] opacity-70" htmlFor="position-location">Body location</label>
+                  <label className="text-sm font-medium" htmlFor="position-location">Body location</label>
                   <select
                     id="position-location"
                     value={positionLocation}
                     onChange={(e) => setPositionLocation(e.target.value)}
                     disabled={recording}
-                    className="rounded p-2 text-sm"
-                    style={{ background: "#0a0c10", color: "#e7e5e4", border: "1px solid #303441" }}
+                    className="rounded-lg px-3 py-2.5 text-base"
+                    style={{ background: LAB_UI.surface, color: LAB_UI.text, border: `1px solid ${LAB_UI.border}` }}
                   >
                     {POSITION_LOCATIONS.map(([id, label]) => (
                       <option key={id} value={id}>{label}</option>
@@ -2653,33 +2676,33 @@ export default function LabPage() {
                       value={positionCustomLocation}
                       onChange={(e) => setPositionCustomLocation(e.target.value)}
                       disabled={recording}
-                      className="rounded p-2 text-sm"
-                      style={{ background: "#0a0c10", color: "#e7e5e4", border: "1px solid #303441" }}
+                      className="rounded-lg px-3 py-2.5 text-base"
+                      style={{ background: LAB_UI.surface, color: LAB_UI.text, border: `1px solid ${LAB_UI.border}` }}
                     />
                   )}
-                  <div className="grid grid-cols-2 gap-2">
-                    <label className="text-[11px] opacity-70 flex flex-col gap-1">
+                  <div className="grid grid-cols-2 gap-3">
+                    <label className="text-sm font-medium flex flex-col gap-1.5">
                       Alignment
                       <select
                         value={positionAlignment}
                         onChange={(e) => setPositionAlignment(e.target.value as "midline" | "left" | "right")}
                         disabled={recording}
-                        className="rounded p-2 text-sm"
-                        style={{ background: "#0a0c10", color: "#e7e5e4", border: "1px solid #303441" }}
+                        className="rounded-lg px-3 py-2.5 text-base"
+                        style={{ background: LAB_UI.surface, color: LAB_UI.text, border: `1px solid ${LAB_UI.border}` }}
                       >
                         <option value="midline">Midline</option>
                         <option value="left">Patient left</option>
                         <option value="right">Patient right</option>
                       </select>
                     </label>
-                    <label className="text-[11px] opacity-70 flex flex-col gap-1">
+                    <label className="text-sm font-medium flex flex-col gap-1.5">
                       Recording length
                       <select
                         value={positionDurationSec}
                         onChange={(e) => setPositionDurationSec(Number(e.target.value))}
                         disabled={recording}
-                        className="rounded p-2 text-sm"
-                        style={{ background: "#0a0c10", color: "#e7e5e4", border: "1px solid #303441" }}
+                        className="rounded-lg px-3 py-2.5 text-base"
+                        style={{ background: LAB_UI.surface, color: LAB_UI.text, border: `1px solid ${LAB_UI.border}` }}
                       >
                         <option value={30}>30 seconds</option>
                         <option value={45}>45 seconds</option>
@@ -2687,29 +2710,29 @@ export default function LabPage() {
                       </select>
                     </label>
                   </div>
-                  <div className="grid grid-cols-2 gap-2">
-                    <label className="text-[11px] opacity-70 flex flex-col gap-1">
+                  <div className="grid grid-cols-2 gap-3">
+                    <label className="text-sm font-medium flex flex-col gap-1.5">
                       Posture
                       <select
                         value={positionPosture}
                         onChange={(e) => setPositionPosture(e.target.value as "supine" | "reclined" | "seated")}
                         disabled={recording}
-                        className="rounded p-2 text-sm"
-                        style={{ background: "#0a0c10", color: "#e7e5e4", border: "1px solid #303441" }}
+                        className="rounded-lg px-3 py-2.5 text-base"
+                        style={{ background: LAB_UI.surface, color: LAB_UI.text, border: `1px solid ${LAB_UI.border}` }}
                       >
                         <option value="supine">Lying flat</option>
                         <option value="reclined">Reclined</option>
                         <option value="seated">Seated</option>
                       </select>
                     </label>
-                    <label className="text-[11px] opacity-70 flex flex-col gap-1">
+                    <label className="text-sm font-medium flex flex-col gap-1.5">
                       Phone contact
                       <select
                         value={positionAttachment}
                         onChange={(e) => setPositionAttachment(e.target.value as "resting" | "light-contact" | "secured")}
                         disabled={recording}
-                        className="rounded p-2 text-sm"
-                        style={{ background: "#0a0c10", color: "#e7e5e4", border: "1px solid #303441" }}
+                        className="rounded-lg px-3 py-2.5 text-base"
+                        style={{ background: LAB_UI.surface, color: LAB_UI.text, border: `1px solid ${LAB_UI.border}` }}
                       >
                         <option value="resting">Resting, hands off</option>
                         <option value="light-contact">Light hand contact</option>
@@ -2717,7 +2740,7 @@ export default function LabPage() {
                       </select>
                     </label>
                   </div>
-                  <div className="text-[11px] opacity-70 leading-relaxed">
+                  <div className="text-sm leading-relaxed" style={{ color: LAB_UI.muted }}>
                     Phone: flat on the body, charging port toward the patient&apos;s face.
                   </div>
                 </>
@@ -2733,24 +2756,24 @@ export default function LabPage() {
                       startRec();
                     }
                   }}
-                  className="rounded-md py-2.5 font-semibold"
-                  style={{ background: freeMode === "position-study" ? "#16a34a" : "#dc2626", color: "white" }}
+                  className="rounded-lg py-3 font-semibold"
+                  style={{ background: LAB_UI.accent, color: "white" }}
                 >
-                  {freeMode === "position-study" ? "▶ Record this position" : "● Start free record"}
+                  {freeMode === "position-study" ? "Record this position" : "Start free recording"}
                 </button>
               ) : guidedActive ? (
-                <div className="rounded-md py-2.5 text-center text-xs opacity-60" style={{ background: "#0a0c10" }}>
+                <div className="rounded-lg py-2.5 text-center text-sm" style={{ background: LAB_UI.subtle, color: LAB_UI.muted }}>
                   Guided run is recording above
                 </div>
               ) : (
                 <button
                   onClick={stopRec}
-                  className="rounded-md py-2.5 font-semibold"
-                  style={{ background: "#0ea5e9", color: "white" }}
+                  className="rounded-lg py-3 font-semibold"
+                  style={{ background: LAB_UI.accent, color: "white" }}
                 >
                   {freeMode === "position-study"
-                    ? `■ Finish & analyze · ${Math.max(0, Math.ceil(positionDurationSec - duration))}s left`
-                    : "■ Finish & review"}
+                    ? `Finish and analyze · ${Math.max(0, Math.ceil(positionDurationSec - duration))}s left`
+                    : "Finish and review"}
                 </button>
               )}
               {freeMode === "position-study" && positionTraceAnchorPitch != null && positionTraceSessionStart != null && (
@@ -2771,49 +2794,52 @@ export default function LabPage() {
                     <button
                       key={type}
                       onClick={() => mark(type)}
-                      className="rounded py-2 text-sm"
-                      style={{ background: "#0a0c10", color: "#e7e5e4", border: "1px solid #303441" }}
+                      className="rounded-lg py-2.5 text-sm font-medium"
+                      style={{ background: LAB_UI.subtle, color: LAB_UI.text, border: `1px solid ${LAB_UI.border}` }}
                     >
                       {label}
                     </button>
                   ))}
                 </div>
               )}
-            </div>}
+            </section>}
 
           </>
         )}
 
         {permissionError && (
-          <p className="text-xs" style={{ color: "#fca5a5" }}>
+          <p className="rounded-lg p-3 text-sm" style={{ color: LAB_UI.danger, background: LAB_UI.dangerSoft }}>
             {permissionError}
           </p>
         )}
 
         {labView === "results" && displayedRecording && !recording && !guidedActive && (
           <>
-            <div className="rounded-lg p-4 flex flex-col gap-3" style={{ background: "#1c1f26", border: "1px solid #303441" }}>
+            <section className="rounded-xl p-5 flex flex-col gap-4" style={{ background: LAB_UI.surface, border: `1px solid ${LAB_UI.border}` }}>
               <div className="flex items-start justify-between gap-3">
                 <div>
-                  <div className="text-xs uppercase tracking-wider" style={{ color: "#86efac" }}>Trace complete</div>
-                  <div className="mt-1 text-sm font-semibold">{displayedRecording.scenario}</div>
-                  <div className="mt-1 text-[10px] opacity-60">
+                  <div className="text-sm font-semibold" style={{ color: LAB_UI.success }}>Trace complete</div>
+                  <h2 className="mt-1 text-xl font-semibold">{displayedRecording.scenario}</h2>
+                  <div className="mt-1 text-sm" style={{ color: LAB_UI.muted }}>
                     {displayedRecording.durationSec}s · {displayedRecording.samples.length} samples · {displayedRecording.events.length} events
                   </div>
                   {displayedRecording.device && (
-                    <div className="mt-1 text-[10px] opacity-55">
-                      device: {displayedRecording.device.platform ?? "unknown platform"} · {displayedRecording.device.screen.width}×{displayedRecording.device.screen.height} · {displayedRecording.device.orientation ?? "orientation unavailable"} · {displayedRecording.device.pixelRatio}× pixel ratio
-                    </div>
+                    <details className="mt-2 text-xs" style={{ color: LAB_UI.muted }}>
+                      <summary className="cursor-pointer">Device details</summary>
+                      <div className="mt-1">
+                        {displayedRecording.device.platform ?? "Unknown platform"} · {displayedRecording.device.screen.width}×{displayedRecording.device.screen.height} · {displayedRecording.device.orientation ?? "orientation unavailable"} · {displayedRecording.device.pixelRatio}× pixel ratio
+                      </div>
+                    </details>
                   )}
                 </div>
-                <div className="text-right text-[10px] opacity-60">
+                <div className="text-right text-xs" style={{ color: LAB_UI.muted }}>
                   {displayedRecording.contributor?.participantCode ?? "Imported trace"}<br />
                   {displayedRecording.appBuild}
                 </div>
               </div>
 
               {last && !imported && (
-                <label className="text-[11px] opacity-75 flex flex-col gap-1">
+                <label className="text-sm font-medium flex flex-col gap-1.5">
                   Notes about this recording
                   <textarea
                     value={note}
@@ -2821,19 +2847,19 @@ export default function LabPage() {
                     maxLength={2000}
                     rows={3}
                     placeholder="Describe phone movement, placement uncertainty, interruptions, breathing observations, or anything unexpected. Do not enter personal health information."
-                    className="rounded p-2.5 text-sm resize-y"
-                    style={{ background: "#0a0c10", color: "#e7e5e4", border: "1px solid #303441" }}
+                    className="rounded-lg px-3 py-2.5 text-base resize-y"
+                    style={{ background: LAB_UI.surface, color: LAB_UI.text, border: `1px solid ${LAB_UI.border}` }}
                   />
                 </label>
               )}
 
               {last && !imported && (
-                <div className="grid grid-cols-1 sm:grid-cols-3 gap-2">
+                <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
                   <button
                     onClick={() => void submitLastRecording()}
                     disabled={centralCollection !== "ready" || submissionState.status === "submitting" || submissionState.status === "success"}
-                    className="rounded-md py-2.5 text-xs font-semibold disabled:opacity-35"
-                    style={{ background: "#16a34a", color: "white" }}
+                    className="rounded-lg py-3 text-sm font-semibold disabled:opacity-35"
+                    style={{ background: LAB_UI.accent, color: "white" }}
                   >
                     {submissionState.status === "submitting"
                       ? "Submitting…"
@@ -2843,15 +2869,15 @@ export default function LabPage() {
                   </button>
                   <button
                     onClick={() => download({ ...last, note })}
-                    className="rounded-md py-2.5 text-xs font-semibold"
-                    style={{ background: "#0ea5e9", color: "white" }}
+                    className="rounded-lg py-3 text-sm font-semibold"
+                    style={{ background: LAB_UI.surface, color: LAB_UI.accent, border: `1px solid ${LAB_UI.accent}` }}
                   >
                     Download JSON
                   </button>
                   <button
                     onClick={() => void shareRecording({ ...last, note })}
-                    className="rounded-md py-2.5 text-xs font-semibold"
-                    style={{ background: "#334155", color: "white" }}
+                    className="rounded-lg py-3 text-sm font-semibold"
+                    style={{ background: LAB_UI.subtle, color: LAB_UI.text, border: `1px solid ${LAB_UI.border}` }}
                   >
                     Share / email JSON
                   </button>
@@ -2859,25 +2885,25 @@ export default function LabPage() {
               )}
 
               {centralCollection !== "ready" && last && !imported && (
-                <div className="rounded-md p-2 text-[10px] leading-relaxed" style={{ background: "#3a260f", color: "#fdba74", border: "1px solid #78350f" }}>
+                <div className="rounded-lg p-3 text-sm leading-relaxed" style={{ background: LAB_UI.warningSoft, color: LAB_UI.warning }}>
                   Central upload is not configured yet. Download or share the JSON so this trace is not lost.
                 </div>
               )}
               {submissionState.status === "success" && (
-                <div className="rounded-md p-2 text-xs" style={{ background: "#0d2b1a", color: "#bbf7d0", border: "1px solid #166534" }}>
+                <div className="rounded-lg p-3 text-sm" style={{ background: LAB_UI.successSoft, color: LAB_UI.success }}>
                   Stored successfully. Receipt: <span className="font-semibold">{submissionState.id}</span>
                 </div>
               )}
               {submissionState.status === "error" && (
-                <div className="rounded-md p-2 text-xs" style={{ background: "#3a0f0f", color: "#fca5a5", border: "1px solid #7f1d1d" }}>
+                <div className="rounded-lg p-3 text-sm" style={{ background: LAB_UI.dangerSoft, color: LAB_UI.danger }}>
                   {submissionState.message} Download the JSON backup before leaving this page.
                 </div>
               )}
 
-              <button onClick={startAnotherRecording} className="self-start text-xs underline opacity-70">
+              <button onClick={startAnotherRecording} className="self-start text-sm font-medium" style={{ color: LAB_UI.accent }}>
                 Record another trace
               </button>
-            </div>
+            </section>
 
             {positionRuns.length > 0 && displayedRecording.positionStudy && last && !imported && (
               <PositionStudyComparison
@@ -2892,11 +2918,11 @@ export default function LabPage() {
         )}
 
         {labView === "home" && (
-          <details className="rounded-lg p-3" style={{ background: "#1c1f26", border: "1px solid #303441" }}>
-            <summary className="cursor-pointer text-xs uppercase tracking-wider opacity-65">Review an existing JSON</summary>
+          <details className="rounded-lg px-4 py-3" style={{ background: LAB_UI.surface, border: `1px solid ${LAB_UI.border}` }}>
+            <summary className="cursor-pointer text-sm font-medium">Review an existing JSON file</summary>
             <div className="mt-3 flex flex-wrap items-center justify-between gap-2">
-              <div className="text-[11px] opacity-70">Open a previous P0 file to review its trace and results.</div>
-              <label className="cursor-pointer rounded px-3 py-2 text-xs font-semibold" style={{ background: "#0ea5e9", color: "white" }}>
+              <div className="text-sm" style={{ color: LAB_UI.muted }}>Open a previous recording to review its trace and results.</div>
+              <label className="cursor-pointer rounded-lg px-4 py-2 text-sm font-semibold" style={{ background: LAB_UI.accent, color: "white" }}>
                 Open JSON
                 <input
                   type="file"
@@ -2909,7 +2935,7 @@ export default function LabPage() {
                 />
               </label>
             </div>
-            {importError && <div className="mt-2 text-xs" style={{ color: "#fca5a5" }}>{importError}</div>}
+            {importError && <div className="mt-2 text-sm" style={{ color: LAB_UI.danger }}>{importError}</div>}
           </details>
         )}
       </div>
@@ -2921,31 +2947,30 @@ function GuidedJourney({ stage }: { stage: GuidedStage }) {
   const currentIndex = GUIDED_JOURNEY.findIndex((item) => item.id === stage);
   const current = currentIndex >= 0 ? GUIDED_JOURNEY[currentIndex] : null;
   return (
-    <div className="rounded-md p-2.5" style={{ background: "#0a0c10", border: "1px solid #303441" }}>
-      <div className="grid grid-cols-2 sm:grid-cols-4 gap-1.5">
+    <div className="py-1">
+      <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
         {GUIDED_JOURNEY.map((item, index) => {
           const isCurrent = index === currentIndex;
           const isComplete = currentIndex >= 0 && index < currentIndex;
           return (
             <div
               key={item.id}
-              className="rounded p-2 min-h-16"
+              className="pt-2 min-h-16"
               style={{
-                background: isCurrent ? "#0c2d48" : isComplete ? "#0d2b1a" : "#151820",
-                border: `1px solid ${isCurrent ? "#38bdf8" : isComplete ? "#22c55e" : "#303441"}`,
+                borderTop: `3px solid ${isCurrent ? LAB_UI.accent : isComplete ? LAB_UI.success : LAB_UI.border}`,
                 opacity: currentIndex < 0 || isCurrent || isComplete ? 1 : 0.58,
               }}
             >
-              <div className="text-[10px] font-semibold uppercase tracking-wide">{item.title}</div>
-              <div className="mt-1 text-[9px] leading-tight opacity-70">{item.detail}</div>
+              <div className="text-xs font-semibold">{item.title}</div>
+              <div className="mt-1 text-xs leading-tight" style={{ color: LAB_UI.muted }}>{item.detail}</div>
             </div>
           );
         })}
       </div>
-      <div className="mt-2 text-[10px] leading-relaxed" style={{ color: current ? "#bae6fd" : "#a8a29e" }}>
+      <div className="mt-2 text-sm leading-relaxed" style={{ color: current ? LAB_UI.accent : LAB_UI.muted }}>
         {current
-          ? `Collecting now: ${current.data}.`
-          : "Journey: three regular cycles → three calibrations → three coached holds → review."}
+          ? current.data
+          : "Three regular cycles → three calibrations → three coached holds → review"}
       </div>
     </div>
   );
@@ -2981,29 +3006,25 @@ function PositionStudyComparison({ runs }: { runs: PositionRun[] }) {
 
   return (
     <div
-      className="rounded-lg p-3 flex flex-col gap-3"
-      style={{ background: "#1c1f26", border: "1px solid #303441" }}
+      className="rounded-xl p-5 flex flex-col gap-4"
+      style={{ background: LAB_UI.surface, border: `1px solid ${LAB_UI.border}` }}
     >
       <div className="flex items-start justify-between gap-3">
         <div>
-          <div className="text-xs uppercase tracking-wider opacity-60">Position comparison</div>
-          <div className="mt-1 text-[11px] opacity-70 leading-relaxed">
-            Blue and pink bars share the same degree scale. Strongest signal means the highest
-            measured peak-to-trough amplitude divided by high-frequency noise, using a 0.02°
-            noise floor.
-          </div>
+          <h2 className="text-lg font-semibold">Position comparison</h2>
+          <p className="mt-1 text-sm" style={{ color: LAB_UI.muted }}>Compare breathing amplitude with measurement noise.</p>
         </div>
-        <div className="text-[10px] text-right shrink-0 opacity-60">{runs.length} recording{runs.length === 1 ? "" : "s"}</div>
+        <div className="text-sm text-right shrink-0" style={{ color: LAB_UI.muted }}>{runs.length} recording{runs.length === 1 ? "" : "s"}</div>
       </div>
 
       {strongest && (
-        <div className="rounded-md p-2 text-xs" style={{ background: "#0d2b1a", color: "#bbf7d0", border: "1px solid #166534" }}>
+        <div className="rounded-lg p-3 text-sm" style={{ background: LAB_UI.successSoft, color: LAB_UI.success }}>
           Strongest measured signal so far: <span className="font-semibold">{strongest.locationLabel} · {strongest.alignment}</span>
           {` (${strongest.analysis.amplitudeToNoiseRatio}× amplitude/noise)`}
         </div>
       )}
       {setupVaries && (
-        <div className="rounded-md p-2 text-[10px] leading-relaxed" style={{ background: "#3a260f", color: "#fdba74", border: "1px solid #78350f" }}>
+        <div className="rounded-lg p-3 text-sm leading-relaxed" style={{ background: LAB_UI.warningSoft, color: LAB_UI.warning }}>
           Posture, phone contact, or duration changed between recordings. Repeat with those
           settings matched before treating the ranking as a fair location comparison.
         </div>
@@ -3016,12 +3037,12 @@ function PositionStudyComparison({ runs }: { runs: PositionRun[] }) {
           return (
             <div
               key={run.sessionId}
-              className="rounded-md p-2.5"
-              style={{ background: "#0a0c10", border: `1px solid ${isStrongest ? "#22c55e" : "#303441"}` }}
+              className="rounded-lg p-3"
+              style={{ background: LAB_UI.surface, border: `1px solid ${isStrongest ? LAB_UI.success : LAB_UI.border}` }}
             >
               <div className="flex items-center justify-between gap-3 text-xs">
                 <span className="font-semibold">{index + 1}. {run.locationLabel} · {run.alignment}</span>
-                <span style={{ color: analysis.enoughData ? "#86efac" : "#fdba74" }}>
+                <span style={{ color: analysis.enoughData ? LAB_UI.success : LAB_UI.warning }}>
                   {analysis.enoughData ? `${analysis.amplitudeToNoiseRatio ?? "—"}× signal/noise` : "needs more cycles"}
                 </span>
               </div>
@@ -3029,14 +3050,14 @@ function PositionStudyComparison({ runs }: { runs: PositionRun[] }) {
                 {run.posture} · {run.attachment} · {run.requestedDurationSec}s
               </div>
               <div className="mt-2 grid grid-cols-[68px_1fr_48px] gap-x-2 gap-y-1 items-center text-[10px]">
-                <span style={{ color: "#7dd3fc" }}>amplitude</span>
-                <div className="h-2 rounded-full overflow-hidden" style={{ background: "#172033" }}>
-                  <div className="h-full rounded-full" style={{ width: `${pct(analysis.medianPeakToTroughAmplitudeDeg)}%`, background: "#38bdf8" }} />
+                <span style={{ color: LAB_UI.trace }}>amplitude</span>
+                <div className="h-2 rounded-full overflow-hidden" style={{ background: LAB_UI.subtle }}>
+                  <div className="h-full rounded-full" style={{ width: `${pct(analysis.medianPeakToTroughAmplitudeDeg)}%`, background: LAB_UI.trace }} />
                 </div>
                 <span className="text-right">{analysis.medianPeakToTroughAmplitudeDeg ?? "—"}°</span>
-                <span style={{ color: "#fda4af" }}>noise</span>
-                <div className="h-2 rounded-full overflow-hidden" style={{ background: "#172033" }}>
-                  <div className="h-full rounded-full" style={{ width: `${pct(analysis.noiseRobustSdDeg)}%`, background: "#fb7185" }} />
+                <span style={{ color: LAB_UI.muted }}>noise</span>
+                <div className="h-2 rounded-full overflow-hidden" style={{ background: LAB_UI.subtle }}>
+                  <div className="h-full rounded-full" style={{ width: `${pct(analysis.noiseRobustSdDeg)}%`, background: LAB_UI.muted }} />
                 </div>
                 <span className="text-right">{analysis.noiseRobustSdDeg ?? "—"}°</span>
               </div>
@@ -3050,7 +3071,7 @@ function PositionStudyComparison({ runs }: { runs: PositionRun[] }) {
           );
         })}
       </div>
-      <div className="text-[10px] opacity-60 leading-relaxed">
+      <div className="text-xs leading-relaxed" style={{ color: LAB_UI.muted }}>
         This comparison ranks phone-position signal quality only. It does not determine lung
         volume, treatment suitability, or the clinical target location.
       </div>
@@ -3140,17 +3161,17 @@ function ContinuousBreathingTrace({
     return "5s LEFT";
   };
   const markerColor = (event: LabEvent) => {
-    if (event.type === "inhale_start") return "#38bdf8";
-    if (event.type === "hold_start") return "#a78bfa";
-    if (event.type === "release") return "#fb7185";
-    return "#f59e0b";
+    if (event.type === "inhale_start") return LAB_UI.trace;
+    if (event.type === "hold_start") return LAB_UI.accent;
+    if (event.type === "release") return LAB_UI.danger;
+    return LAB_UI.warning;
   };
 
   return (
-    <div className="rounded-md overflow-hidden" style={{ background: "#0a0c10", border: "1px solid #303441" }}>
-      <div className="px-3 py-2 flex items-center justify-between gap-3 text-[10px] uppercase tracking-wider">
-        <span>{title}</span>
-        <span className="opacity-60">
+    <div className="rounded-lg overflow-hidden" style={{ background: LAB_UI.surface, border: `1px solid ${LAB_UI.border}` }}>
+      <div className="px-3 py-2 flex items-center justify-between gap-3 text-xs">
+        <span className="font-semibold">{title}</span>
+        <span style={{ color: LAB_UI.muted }}>
           {description ?? "inhale ↑ • green dots = local peaks"} • {minimum.toFixed(1)}° to {maximum.toFixed(1)}°
         </span>
       </div>
@@ -3168,7 +3189,7 @@ function ContinuousBreathingTrace({
               x2={chartWidth - pad.right}
               y1={pad.top + plotHeight * fraction}
               y2={pad.top + plotHeight * fraction}
-              stroke="#253044"
+              stroke={LAB_UI.grid}
               strokeWidth="1"
             />
           ))}
@@ -3177,7 +3198,7 @@ function ContinuousBreathingTrace({
             x2={chartWidth - pad.right}
             y1={yFor(0)}
             y2={yFor(0)}
-            stroke="#64748b"
+            stroke={LAB_UI.muted}
             strokeWidth="1"
           />
           {Array.from({ length: Math.floor(lastMs / 5000) + 1 }, (_, index) => index * 5000).map(
@@ -3188,10 +3209,10 @@ function ContinuousBreathingTrace({
                   x2={xFor(time)}
                   y1={pad.top}
                   y2={chartHeight - pad.bottom}
-                  stroke="#1f2937"
+                  stroke={LAB_UI.grid}
                   strokeWidth="1"
                 />
-                <text x={xFor(time) + 2} y={chartHeight - 8} fill="#94a3b8" fontSize="9">
+                <text x={xFor(time) + 2} y={chartHeight - 8} fill={LAB_UI.muted} fontSize="9">
                   {Math.round(time / 1000)}s
                 </text>
               </g>
@@ -3232,8 +3253,8 @@ function ContinuousBreathingTrace({
                 cx={xFor(marker.time)}
                 cy={yFor(nearest.excursion)}
                 r="3.5"
-                fill="#22c55e"
-                stroke="#bbf7d0"
+                fill={LAB_UI.success}
+                stroke={LAB_UI.successSoft}
                 strokeWidth="1"
               >
                 <title>{`Local normal peak ${marker.peakNumber} before hold ${marker.holdIndex}`}</title>
@@ -3244,19 +3265,19 @@ function ContinuousBreathingTrace({
             <path
               d={path}
               fill="none"
-              stroke="#38bdf8"
+              stroke={LAB_UI.trace}
               strokeWidth="2.5"
               strokeLinejoin="round"
               strokeLinecap="round"
             />
           )}
-          <text x="4" y={pad.top + 4} fill="#94a3b8" fontSize="9">
+          <text x="4" y={pad.top + 4} fill={LAB_UI.muted} fontSize="9">
             {maximum.toFixed(1)}°
           </text>
-          <text x="12" y={Math.min(chartHeight - pad.bottom - 2, yFor(0) + 3)} fill="#94a3b8" fontSize="9">
+          <text x="12" y={Math.min(chartHeight - pad.bottom - 2, yFor(0) + 3)} fill={LAB_UI.muted} fontSize="9">
             0°
           </text>
-          <text x="4" y={chartHeight - pad.bottom} fill="#94a3b8" fontSize="9">
+          <text x="4" y={chartHeight - pad.bottom} fill={LAB_UI.muted} fontSize="9">
             {minimum.toFixed(1)}°
           </text>
         </svg>
@@ -3338,21 +3359,21 @@ function LiveTargetGate({
   return (
     <div
       className="rounded-lg p-3"
-      style={{ background: "#071018", border: `1px solid ${inRange ? "#22c55e" : "#303441"}` }}
+      style={{ background: LAB_UI.surface, border: `1px solid ${inRange ? LAB_UI.success : LAB_UI.border}` }}
     >
       <div className="flex items-start justify-between gap-3">
         <div>
-        <div className="text-[10px] uppercase tracking-wider opacity-60">Live target gate</div>
-        <div className="mt-1 text-sm font-semibold" style={{ color: inRange ? "#4ade80" : "#e7e5e4" }}>
+        <div className="text-xs font-medium" style={{ color: LAB_UI.muted }}>Live target</div>
+        <div className="mt-1 text-base font-semibold" style={{ color: inRange ? LAB_UI.success : LAB_UI.text }}>
           {status}
         </div>
         </div>
-        <div className="text-right text-[10px] opacity-60">INHALE ↑<br />EXHALE ↓</div>
+        <div className="text-right text-xs" style={{ color: LAB_UI.muted }}>Inhale ↑<br />Exhale ↓</div>
       </div>
       <div className="mt-3 grid grid-cols-1 sm:grid-cols-[1fr_76px] gap-3 items-stretch">
-        <div className="rounded-md overflow-hidden" style={{ background: "#111827", border: "1px solid #334155" }}>
-          <div className="px-2 pt-2 text-[9px] uppercase tracking-wider opacity-55">
-            Breathing curve • latest 15 seconds
+        <div className="rounded-lg overflow-hidden" style={{ background: LAB_UI.surface, border: `1px solid ${LAB_UI.border}` }}>
+          <div className="px-3 pt-2 text-xs" style={{ color: LAB_UI.muted }}>
+            Breathing curve · last 15 seconds
           </div>
           <svg
             viewBox={`0 0 ${chartWidth} ${chartHeight}`}
@@ -3367,7 +3388,7 @@ function LiveTargetGate({
                 x2={chartWidth - chartPadding.right}
                 y1={chartPadding.top + plotHeight * fraction}
                 y2={chartPadding.top + plotHeight * fraction}
-                stroke="#253044"
+                stroke={LAB_UI.grid}
                 strokeWidth="1"
               />
             ))}
@@ -3378,8 +3399,8 @@ function LiveTargetGate({
                 width={plotWidth}
                 height={Math.max(4, chartBandBottom - chartBandTop)}
                 rx="3"
-                fill="rgba(34,197,94,0.32)"
-                stroke="#4ade80"
+                fill="rgba(47,111,73,0.16)"
+                stroke={LAB_UI.success}
               />
             )}
             <line
@@ -3387,19 +3408,19 @@ function LiveTargetGate({
               x2={chartWidth - chartPadding.right}
               y1={baselineY}
               y2={baselineY}
-              stroke="#94a3b8"
+              stroke={LAB_UI.muted}
               strokeWidth="1"
             />
-            {curvePath && <path d={curvePath} fill="none" stroke="#38bdf8" strokeWidth="3" strokeLinejoin="round" strokeLinecap="round" />}
-            <text x="3" y={Math.max(12, yFor(maximum) + 5)} fill="#94a3b8" fontSize="9">{maximum.toFixed(1)}°</text>
-            <text x="12" y={Math.min(chartHeight - 23, baselineY + 3)} fill="#94a3b8" fontSize="9">0°</text>
-            <text x={chartPadding.left} y={chartHeight - 6} fill="#94a3b8" fontSize="9">−15s</text>
-            <text x={chartWidth - chartPadding.right - 18} y={chartHeight - 6} fill="#94a3b8" fontSize="9">now</text>
+            {curvePath && <path d={curvePath} fill="none" stroke={LAB_UI.trace} strokeWidth="3" strokeLinejoin="round" strokeLinecap="round" />}
+            <text x="3" y={Math.max(12, yFor(maximum) + 5)} fill={LAB_UI.muted} fontSize="9">{maximum.toFixed(1)}°</text>
+            <text x="12" y={Math.min(chartHeight - 23, baselineY + 3)} fill={LAB_UI.muted} fontSize="9">0°</text>
+            <text x={chartPadding.left} y={chartHeight - 6} fill={LAB_UI.muted} fontSize="9">−15s</text>
+            <text x={chartWidth - chartPadding.right - 18} y={chartHeight - 6} fill={LAB_UI.muted} fontSize="9">now</text>
           </svg>
         </div>
-        <div className="relative min-h-48 rounded-md overflow-hidden" style={{ background: "#111827", border: "1px solid #334155" }}>
+        <div className="relative min-h-48 rounded-lg overflow-hidden" style={{ background: LAB_UI.subtle, border: `1px solid ${LAB_UI.border}` }}>
           {[25, 50, 75].map((value) => (
-            <div key={value} className="absolute left-0 right-0 border-t" style={{ bottom: `${value}%`, borderColor: "#253044" }} />
+            <div key={value} className="absolute left-0 right-0 border-t" style={{ bottom: `${value}%`, borderColor: LAB_UI.grid }} />
           ))}
           {hasBand && (
             <div
@@ -3407,14 +3428,14 @@ function LiveTargetGate({
               style={{
                 bottom: `${bandBottom}%`,
                 height: `${Math.max(4, bandHeight)}%`,
-                background: "rgba(34,197,94,0.42)",
-                border: "1px solid #4ade80",
+                background: "rgba(47,111,73,0.22)",
+                border: `1px solid ${LAB_UI.success}`,
               }}
             />
           )}
           <div
             className="absolute left-0 right-0 h-1 rounded transition-[bottom] duration-100"
-            style={{ bottom: `calc(${Math.max(0, Math.min(100, barMarkerBottom))}% - 2px)`, background: "#38bdf8", boxShadow: "0 0 8px #38bdf8" }}
+            style={{ bottom: `calc(${Math.max(0, Math.min(100, barMarkerBottom))}% - 2px)`, background: LAB_UI.trace }}
           />
           <div className="absolute left-1 top-1 text-[8px] opacity-50">INHALE ↑</div>
           <div className="absolute left-1 bottom-1 text-[8px] opacity-50">EXHALE ↓</div>
@@ -3437,31 +3458,31 @@ function LiveTargetGate({
 function Stat({ label, value }: { label: string; value: string }) {
   return (
     <div
-      className="rounded-md p-2"
-      style={{ background: "#1c1f26", border: "1px solid #303441" }}
+      className="rounded-lg px-3 py-2.5"
+      style={{ background: LAB_UI.surface, border: `1px solid ${LAB_UI.border}` }}
     >
-      <div className="text-[10px] uppercase tracking-wider opacity-60">{label}</div>
-      <div className="font-mono text-sm tabular-nums mt-0.5">{value}</div>
+      <div className="text-xs" style={{ color: LAB_UI.muted }}>{label}</div>
+      <div className="font-mono text-base tabular-nums mt-0.5">{value}</div>
     </div>
   );
 }
 
 function MiniStat({ label, value }: { label: string; value: string }) {
   return (
-    <div className="rounded p-1.5" style={{ background: "#0a0c10" }}>
-      <div className="text-[9px] uppercase tracking-wider opacity-50">{label}</div>
+    <div className="rounded-lg p-2" style={{ background: LAB_UI.subtle }}>
+      <div className="text-[10px]" style={{ color: LAB_UI.muted }}>{label}</div>
       <div className="mt-0.5 font-mono tabular-nums">{value}</div>
     </div>
   );
 }
 
 function guidedPhaseColor(phase: string) {
-  if (phase === "INHALE") return "#38bdf8";
-  if (phase === "HOLD") return "#a78bfa";
-  if (phase === "RELEASE") return "#fb7185";
-  if (phase === "READY") return "#f59e0b";
-  if (phase === "COMPLETE") return "#22c55e";
-  return "#e7e5e4";
+  if (phase === "INHALE") return LAB_UI.trace;
+  if (phase === "HOLD") return LAB_UI.accent;
+  if (phase === "RELEASE") return LAB_UI.danger;
+  if (phase === "READY") return LAB_UI.warning;
+  if (phase === "COMPLETE") return LAB_UI.success;
+  return LAB_UI.text;
 }
 
 function holdCueForSeconds(seconds: number) {

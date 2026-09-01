@@ -1,26 +1,68 @@
 @import "tailwindcss";
 
 :root {
-  --background: #ffffff;
-  --foreground: #171717;
+  --background: #f7f8f7;
+  --foreground: #24312f;
 }
 
 @theme inline {
   --color-background: var(--background);
   --color-foreground: var(--foreground);
-  --font-sans: var(--font-geist-sans);
-  --font-mono: var(--font-geist-mono);
-}
-
-@media (prefers-color-scheme: dark) {
-  :root {
-    --background: #0a0a0a;
-    --foreground: #ededed;
-  }
+  --font-sans: var(--font-source-sans);
+  --font-mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
 }
 
 body {
   background: var(--background);
   color: var(--foreground);
-  font-family: Arial, Helvetica, sans-serif;
+  font-family: var(--font-source-sans), "Segoe UI", sans-serif;
+}
+
+button,
+input,
+select,
+textarea {
+  font: inherit;
+}
+
+button,
+summary,
+select,
+label[for] {
+  -webkit-tap-highlight-color: transparent;
+}
+
+button:focus-visible,
+input:focus-visible,
+select:focus-visible,
+textarea:focus-visible,
+summary:focus-visible {
+  outline: 3px solid rgba(20, 94, 91, 0.2);
+  outline-offset: 2px;
+}
+
+.lab-shell button:not(:disabled),
+.lab-shell summary,
+.lab-shell select,
+.lab-shell label[for] {
+  cursor: pointer;
+}
+
+.lab-shell button {
+  transition: background-color 140ms ease, border-color 140ms ease, color 140ms ease;
+}
+
+.lab-mode-option:hover:not(:disabled) {
+  background: #f7fbfa !important;
+  border-color: #155e5b !important;
+}
+
+.lab-shell summary::marker {
+  color: #155e5b;
+}
+
+@media (max-width: 520px) {
+  .lab-shell {
+    padding: 20px 14px 36px !important;
+  }
 }
