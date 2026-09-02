@@ -680,7 +680,7 @@ export default function LabPage() {
     const recordingBase = {
       schema: "dibh-lab/v3" as const,
       sessionId: sessionIdRef.current,
-      appBuild: "lab-p1.2",
+      appBuild: "lab-p1.3",
       algorithm: LAB_P0_ALGORITHM,
       scenario: activeScenarioRef.current,
       note,
@@ -1481,7 +1481,7 @@ export default function LabPage() {
       inhaleCuePromise: Promise<ReturnType<typeof playClip> extends Promise<infer T> ? T : never>,
     ) => {
       const detectorStartedAt = performance.now();
-      const deadline = detectorStartedAt + 12_000;
+      const deadline = detectorStartedAt + LAB_P0_ALGORITHM.params.holdDetectionWindowMs;
       const minimumDelta = Math.max(0.4, Math.min(1, normalAmplitudeDeg * 0.25));
       let candidateSince: number | null = null;
       let cueResult: Awaited<ReturnType<typeof playClip>> | null = null;
@@ -1545,16 +1545,62 @@ export default function LabPage() {
       let lastCorrectionCompletedAt: number | null = null;
       let pendingCorrection: number | null = null;
       let targetTonePlayed = false;
+      let correctionInFlight = false;
+      let correctionInterruptionRequested = false;
+      let cueQueueOpen = true;
+      let cueFailed = false;
+      let permittedCueInterruptions = 0;
+      let cueQueue: Promise<void> = Promise.resolve();
+
+      // Serialize speech without awaiting it in the 150 ms sensor loop. Beam
+      // events therefore follow physiology in real time instead of audio time.
+      const enqueueCue = (
+        cue: Parameters<typeof playClip>[0],
+        cueMeta: Record<string, unknown>,
+      ) => {
+        const queued = cueQueue.then(async () => {
+          if (!cueQueueOpen || !guidedRunningRef.current) return null;
+          const result = await coach(cue, cueMeta);
+          if (!cueQueueOpen && result === "interrupted") return null;
+          if (result === "interrupted" && permittedCueInterruptions > 0) {
+            permittedCueInterruptions -= 1;
+            return result;
+          }
+          if (result !== "ended") {
+            cueFailed = true;
+            guidedRunningRef.current = false;
+            mark("session_end", { ...cueMeta, outcome: "audio_unavailable", cue, result });
+            setGuidedLabel("AUDIO UNAVAILABLE • Stop and use Test voice before restarting");
+          }
+          return result;
+        });
+        cueQueue = queued.then(() => undefined);
+        return queued;
+      };
+
+      const interruptCorrectionForPriorityCue = () => {
+        if (!correctionInFlight || correctionInterruptionRequested) return;
+        correctionInterruptionRequested = true;
+        permittedCueInterruptions += 1;
+        stopAudio();
+      };
+
+      const closeCueQueue = async () => {
+        cueQueueOpen = false;
+        stopAudio();
+        await cueQueue;
+      };
 
       while (guidedRunningRef.current && performance.now() < deadline) {
         const now = performance.now();
         setStepCountdown(Math.max(1, Math.ceil((deadline - now) / 1000)));
         if (!fiveSecondsAnnounced && now >= deadline - 5000) {
           fiveSecondsAnnounced = true;
-          if (!(await requireCue("p0_five_seconds_left", {
+          interruptCorrectionForPriorityCue();
+          void enqueueCue("p0_five_seconds_left", {
             ...meta,
             reason: "five_seconds_remaining",
-          }))) return { completed: false, aborted: true, correctionCount };
+          });
         }
 
         const currentPitch = oRef.current.betaEma ?? oRef.current.beta;
@@ -1584,16 +1630,17 @@ export default function LabPage() {
           }
           if (!targetTonePlayed) {
             targetTonePlayed = true;
+            interruptCorrectionForPriorityCue();
             mark("target_acquired", {
               ...meta,
               measuredExcursionDeg: roundClient(excursion),
               targetExcursionDeg: target.excursionDeg,
               toleranceDeg: target.toleranceDeg,
             });
-            if (!(await requireCue("p0_in_range_ding", {
+            void enqueueCue("p0_in_range_ding", {
               ...meta,
               reason: "target_acquired",
-            }))) return { completed: false, aborted: true, correctionCount };
+            });
           }
         } else if (!inBand && wasInBand === true) {
           mark("target_exit", {
@@ -1616,6 +1663,7 @@ export default function LabPage() {
           if (
             now - outOfBandSince >= 1000 &&
             responseWindowComplete &&
+            !correctionInFlight &&
             !fiveSecondCueProtected &&
             hasTimeForCorrection
           ) {
@@ -1630,20 +1678,19 @@ export default function LabPage() {
                 measuredExcursionDeg: roundClient(excursion),
                 errorDeg: roundClient(error),
               });
-              const cueResult = await coach(below ? "p0_deeper" : "p0_ease_back", {
+              correctionInFlight = true;
+              void enqueueCue(below ? "p0_deeper" : "p0_ease_back", {
                 ...meta,
                 correctionNumber: correctionCount,
                 reason: below ? "below_target_band" : "above_target_band",
                 measuredExcursionDeg: roundClient(excursion),
                 targetExcursionDeg: target.excursionDeg,
                 errorDeg: roundClient(error),
+              }).then((result) => {
+                correctionInFlight = false;
+                correctionInterruptionRequested = false;
+                if (result === "ended") lastCorrectionCompletedAt = performance.now();
               });
-              if (cueResult !== "ended") {
-                guidedRunningRef.current = false;
-                return { completed: false, aborted: true, correctionCount };
-              }
-              lastCorrectionCompletedAt = performance.now();
-              outOfBandSince = lastCorrectionCompletedAt;
             } else {
               mark("practice_hold_aborted", {
                 ...meta,
@@ -1656,12 +1703,19 @@ export default function LabPage() {
               });
               if (wasInBand) mark("beam_off", { ...meta, reason: "hold_aborted" });
               setStepCountdown(0);
+              await closeCueQueue();
               return { completed: false, aborted: true, correctionCount };
             }
           }
         }
         wasInBand = inBand;
         await sleep(150);
+      }
+
+      await closeCueQueue();
+      if (cueFailed) {
+        setStepCountdown(0);
+        return { completed: false, aborted: true, correctionCount };
       }
 
       if (
